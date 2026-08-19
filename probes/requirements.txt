@@ -1,0 +1,4 @@
+snowflake-connector-python>=3.6.0
+pandas>=2.0.0
+# only needed when connections.toml uses key-pair auth on an older connector
+cryptography>=41.0.0
