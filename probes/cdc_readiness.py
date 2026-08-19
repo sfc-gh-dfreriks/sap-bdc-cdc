@@ -163,18 +163,39 @@ FROM {o.fqn} GROUP BY 1 ORDER BY 1""")
             self.record("cost.pruning", "WARN", "Skipped: no suitable object.")
             return
         o, wm = target
-        probe_col = next((c.name for c in o.columns
-                          if c.is_varchar and c.name.lower() != wm.lower()), None)
-        if not probe_col:
+        candidates = [c.name for c in o.columns
+                      if c.is_varchar and c.name.lower() != wm.lower()][:6]
+        if not candidates:
             self.record("cost.pruning", "WARN", f"{o.name}: no varchar column to project.")
             return
 
+        # SUM(LENGTH(col)) rather than COUNT(*) or COUNT(DISTINCT col): both of those can
+        # be answered from Iceberg manifest statistics without reading data. Even with a
+        # computed expression, a single-valued column still scans zero bytes - which looks
+        # like a broken measurement but is correct - so try several columns and keep the
+        # first that forces a genuine read. Otherwise the comparison has no baseline.
         self.s.execute("ALTER SESSION SET USE_CACHED_RESULT = FALSE")
-        self.s.execute(f"USE DATABASE {fqn(o.database)}")
+        # Query history needs a real database as context: a catalog-linked database has no
+        # usable INFORMATION_SCHEMA, so reading history from inside one returns nothing.
+        self.s.execute("USE DATABASE SNOWFLAKE")
+        probe_col, full, tried = None, {}, []
         try:
-            self.s.rows(f'SELECT COUNT(DISTINCT {q(probe_col)}) AS N FROM {o.fqn}')
-            full = self.s.last_query_bytes()
-            self.s.rows(f"""SELECT COUNT({q(probe_col)}) AS N FROM {o.fqn}
+            for cand in candidates:
+                self.s.rows(f"SELECT SUM(LENGTH({q(cand)})) AS N FROM {o.fqn}")
+                st = self.s.last_query_bytes()
+                tried.append({"column": cand,
+                              "mb": round(float(st.get("BYTES_SCANNED") or 0) / 1048576, 2)})
+                if float(st.get("BYTES_SCANNED") or 0) > 0:
+                    probe_col, full = cand, st
+                    break
+            if probe_col is None:
+                self.record("cost.pruning", "WARN",
+                            "No probe column produced a measurable full scan - every candidate "
+                            "was answerable from Iceberg statistics alone. Pruning cannot be "
+                            "compared. This is not a fault in the share.",
+                            evidence={"object": o.name, "columns_tried": tried})
+                return
+            self.s.rows(f"""SELECT SUM(LENGTH({q(probe_col)})) AS N FROM {o.fqn}
 WHERE {q(wm)} > DATEADD('hour', -36, CURRENT_TIMESTAMP())""")
             delta = self.s.last_query_bytes()
         finally:
@@ -184,6 +205,7 @@ WHERE {q(wm)} > DATEADD('hour', -36, CURRENT_TIMESTAMP())""")
         db_ = float(delta.get("BYTES_SCANNED") or 0)
         ratio = (db_ / fb) if fb else None
         ev = {"object": o.name, "watermark": wm, "projected_column": probe_col,
+              "columns_tried": tried,
               "full_scan_mb": round(fb / 1048576, 2),
               "watermark_scan_mb": round(db_ / 1048576, 2),
               "ratio": round(ratio, 6) if ratio is not None else None}
@@ -343,6 +365,15 @@ FROM TABLE({fqn(SCRATCH)}.INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY(
             why = ["No replication timestamp and no incremental dynamic table. There is no "
                    "change signal to build on.",
                    "Ask the BDC pipeline owner to add a load timestamp to each object."]
+        elif dt == "INFO":
+            v = "READY WITH CAVEATS"
+            why = ["The change signal is present and usable, but the recommended mechanism was "
+                   "not proven: re-run with --with-scratch-tests to confirm that a dynamic "
+                   "table refreshes incrementally over this share rather than inferring it."]
+            if prune == "PASS":
+                why.append("The watermark prunes, so the exception path is available regardless.")
+            elif prune == "WARN":
+                why.append("Pruning could not be measured cleanly; see the finding below.")
         else:
             v = "READY WITH CAVEATS"
             why = ["Some checks were inconclusive. Read the findings below and re-run "

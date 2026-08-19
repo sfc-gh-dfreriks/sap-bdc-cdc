@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 .DS_Store
-readiness.md
-readiness.json
 *.egg-info/
 .venv/
+# assessment output written into the probes directory at run time
+probes/readiness.md
+probes/readiness.json
