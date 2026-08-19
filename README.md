@@ -163,6 +163,7 @@ gaps worth raising with Snowflake product management.
 | [docs/how-it-works.md](docs/how-it-works.md) | The mechanism, the evidence, and why the alternatives are refused |
 | [docs/deployment.md](docs/deployment.md) | Step-by-step, with the checks to run at each stage |
 | [docs/gaps-and-asks.md](docs/gaps-and-asks.md) | Limitations, open questions, and product asks |
+| [collateral/SAP_BDC_CDC_White_Paper.pdf](collateral/SAP_BDC_CDC_White_Paper.pdf) | The self-contained version of all three, with diagrams and the step-by-step build, in 20 pages |
 
 ## Repository layout
 
@@ -170,6 +171,7 @@ gaps worth raising with Snowflake product management.
 probes/       readiness assessment — tenant-agnostic, discovers the share by kind
 sql/          deployable SQL, in the order you run it
 docs/         the reasoning behind the SQL
+collateral/   white paper, executive summary and deck — anonymised, ready to share
 assets/       diagrams, reusable in your own decks
 examples/     sample assessment output from a reference tenant
 ```
