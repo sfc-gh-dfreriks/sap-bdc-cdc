@@ -29,15 +29,19 @@ FILENAMES = {
     "exec-deck":      "SAP_BDC_CDC_Executive_Overview.pptx",
 }
 
-# ── palette (blue / slate / grey - no Mosaic green) ───────────────────────
-NAVY    = "#1F3A6B"
-BLUE    = "#2C5282"
+# ── palette (Snowflake brand) ─────────────────────────────────────────────
+# Snowflake Blue #29B5E8 is the primary accent; Midnight Blue #11567F carries
+# headings and table headers, because #29B5E8 on white is too light to read at
+# body weight. Greys are unchanged.
+NAVY    = "#11567F"     # Snowflake Midnight Blue - headings, table headers
+BLUE    = "#29B5E8"     # Snowflake Blue - rules, accents, sub-headings
+DEEP    = "#0B3D5C"     # darker still, for the cover strip
 SLATE   = "#4A5568"
 MID     = "#718096"
-RULE    = "#CBD5E0"
-LIGHT   = "#EBF4FF"
-ALT     = "#F7F9FC"
-CODE_BG = "#F1F5F9"
+RULE    = "#BFDCEB"     # tinted to the brand rather than neutral grey
+LIGHT   = "#E8F6FD"     # pale Snowflake blue
+ALT     = "#F4FBFE"
+CODE_BG = "#EEF7FB"
 TEXT    = "#1A202C"
 WHITE   = "#FFFFFF"
 WARNBG  = "#FFFBEB"
@@ -764,7 +768,7 @@ REC_SECTIONS = [
                      "object - identical across all seven objects.",
                      "No value for capture. Do not replicate it."],
                 ],
-                "col_widths": [0.17, 0.53, 0.30],
+                "col_widths": [0.23, 0.47, 0.30],
             }),
             ("para",
              "The __TIMESTAMP finding is the one that generalises into a rule. "
@@ -820,7 +824,7 @@ REC_SECTIONS = [
                      "0.00 MB in 47-79 ms",
                      "tie"],
                 ],
-                "col_widths": [0.16, 0.30, 0.32, 0.11],
+                "col_widths": [0.18, 0.31, 0.33, 0.18],
             }),
             ("para",
              "The engine is identical on both tracks and proven on both. On the "
@@ -1599,6 +1603,28 @@ for _after_title, _file, _caption in DECK_FIGURES:
 # PDF infrastructure
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _esc(text) -> str:
+    """Escape text for reportlab's Paragraph mini-markup.
+
+    Not cosmetic - this fixes silent content loss. Paragraph parses its input as
+    markup, so any run that looks like a tag is consumed and dropped without a
+    warning. Three placeholders in this document were being deleted outright:
+    `load_type_<hash>` rendered as `load_type_`, `ON TABLE <share>` lost its
+    argument, and the documented command `--connection <your_account>` rendered as
+    `--connection`, which would send a reader off to run something broken.
+
+    `<32-hex-hash>` survived only because it starts with a digit and so failed to
+    match a tag name - which is exactly the kind of accident that makes the bug
+    hard to spot by eye.
+
+    Escape before any deliberate markup is added: _make_code_block turns newlines
+    into <br/> AFTER calling this.
+    """
+    return (str(text).replace("&", "&amp;")
+                     .replace("<", "&lt;")
+                     .replace(">", "&gt;"))
+
+
 def _hex(c: str):
     from reportlab.lib.colors import HexColor
     return HexColor(c)
@@ -1615,7 +1641,7 @@ def _build_styles(body_size: float = 9.5):
     )
     s["h2"] = ParagraphStyle(
         "h2", fontName="Helvetica-Bold", fontSize=11,
-        textColor=_hex(BLUE), spaceBefore=10, spaceAfter=4, leading=15,
+        textColor=_hex(NAVY), spaceBefore=10, spaceAfter=4, leading=15,
     )
     s["body"] = ParagraphStyle(
         "body", fontName="Helvetica", fontSize=body_size,
@@ -1636,12 +1662,12 @@ def _build_styles(body_size: float = 9.5):
         leading=body_size * 1.45, alignment=TA_JUSTIFY,
     )
     s["th"] = ParagraphStyle(
-        "th", fontName="Helvetica-Bold", fontSize=8.5,
-        textColor=_hex(WHITE), leading=12,
+        "th", fontName="Helvetica-Bold", fontSize=9,
+        textColor=_hex(WHITE), leading=12.5,
     )
     s["td"] = ParagraphStyle(
-        "td", fontName="Helvetica", fontSize=8.5,
-        textColor=_hex(TEXT), leading=12,
+        "td", fontName="Helvetica", fontSize=9,
+        textColor=_hex(TEXT), leading=12.8,
     )
     s["caption"] = ParagraphStyle(
         "caption", fontName="Helvetica-Oblique", fontSize=8,
@@ -1683,7 +1709,7 @@ def _make_figure(spec, page_w, styles):
     img.hAlign = "CENTER"
     group = [Spacer(1, 1 * mm), img]
     if spec.get("caption"):
-        group += [Spacer(1, 1.5 * mm), Paragraph(spec["caption"], styles["caption"])]
+        group += [Spacer(1, 1.5 * mm), Paragraph(_esc(spec["caption"]), styles["caption"])]
     group.append(Spacer(1, 4 * mm))
     return [KeepTogether(group)]
 
@@ -1702,9 +1728,9 @@ def _make_table(headers, rows, col_frac, page_w, styles):
 
     data = []
     # header row
-    data.append([Paragraph(h, th) for h in headers])
+    data.append([Paragraph(_esc(h), th) for h in headers])
     for row in rows:
-        data.append([Paragraph(str(c), td) for c in row])
+        data.append([Paragraph(_esc(c), td) for c in row])
 
     n_cols = len(headers)
     tbl = Table(data, colWidths=col_w, repeatRows=1)
@@ -1715,7 +1741,7 @@ def _make_table(headers, rows, col_frac, page_w, styles):
         row_commands.append(("BACKGROUND", (0, i), (-1, i), bg))
 
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), _hex(BLUE)),
+        ("BACKGROUND", (0, 0), (-1, 0), _hex(NAVY)),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [_hex(WHITE), _hex(ALT)]),
         ("TOPPADDING",    (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
@@ -1730,7 +1756,7 @@ def _make_table(headers, rows, col_frac, page_w, styles):
 def _make_code_block(text, page_w, styles):
     """Wrap code text in a shaded table cell."""
     from reportlab.platypus import Table, TableStyle, Paragraph
-    para = Paragraph(text.replace("\n", "<br/>"), styles["code"])
+    para = Paragraph(_esc(text).replace("\n", "<br/>"), styles["code"])
     tbl = Table([[para]], colWidths=[page_w])
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), _hex(CODE_BG)),
@@ -1746,7 +1772,7 @@ def _make_code_block(text, page_w, styles):
 def _make_warn_block(text, page_w, styles):
     """Amber warning box."""
     from reportlab.platypus import Table, TableStyle, Paragraph
-    para = Paragraph(text, styles["warn"])
+    para = Paragraph(_esc(text), styles["warn"])
     tbl = Table([[para]], colWidths=[page_w])
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), _hex(WARNBG)),
@@ -1768,17 +1794,17 @@ def _section_to_flowables(section, page_w, styles):
 
     level = section.get("level", 1)
     heading_style = styles["h1"] if level == 1 else styles["h2"]
-    items.append(Paragraph(section["heading"], heading_style))
+    items.append(Paragraph(_esc(section["heading"]), heading_style))
     items.append(Spacer(1, 2 * mm))
 
     for kind, content in section.get("body", []):
         if kind == "para":
-            items.append(Paragraph(content, styles["body"]))
+            items.append(Paragraph(_esc(content), styles["body"]))
         elif kind == "h2":
             items.append(Spacer(1, 1 * mm))
-            items.append(Paragraph(content, styles["h2"]))
+            items.append(Paragraph(_esc(content), styles["h2"]))
         elif kind == "note":
-            items.append(Paragraph(content, styles["note"]))
+            items.append(Paragraph(_esc(content), styles["note"]))
         elif kind == "warn":
             items.append(_make_warn_block(content, page_w, styles))
             items.append(Spacer(1, 4 * mm))
@@ -1913,13 +1939,54 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
     body_frame  = Frame(L, B + 6 * mm, W - L - R, H - T - B - 6 * mm, id="body")
 
     def draw_cover(canvas, doc):
+        """Paint the strip AND the title on it.
+
+        The title and subtitle are drawn here rather than added as flowables, and
+        that is a bug fix rather than a preference. They are light-coloured because
+        they sit on the navy strip, but as flowables their position depended on a
+        fixed 40 mm spacer: the spacer pushed them 7 mm BELOW the strip, so both
+        papers shipped with white text on a white background and a blank navy band
+        above it. The text was in the PDF - pdftotext found it - and invisible on
+        the page.
+
+        Drawing at known coordinates inside the strip makes the colour contract
+        positional rather than accidental, so a title that wraps to three lines
+        cannot silently fall off the dark background again.
+        """
         canvas.saveState()
-        # full-bleed navy header strip
-        canvas.setFillColor(_hex(NAVY))
-        canvas.rect(0, H - 55 * mm, W, 55 * mm, fill=1, stroke=0)
-        # thin accent rule
+        strip_h = 55 * mm
+        canvas.setFillColor(_hex(DEEP))
+        canvas.rect(0, H - strip_h, W, strip_h, fill=1, stroke=0)
+        # Snowflake Blue accent rule under the strip
         canvas.setFillColor(_hex(BLUE))
-        canvas.rect(0, H - 57 * mm, W, 2 * mm, fill=1, stroke=0)
+        canvas.rect(0, H - strip_h - 2 * mm, W, 2 * mm, fill=1, stroke=0)
+
+        def wrapped(text, font, size, max_w):
+            out, line = [], ""
+            for word in text.split():
+                trial = f"{line} {word}".strip()
+                if canvas.stringWidth(trial, font, size) <= max_w:
+                    line = trial
+                else:
+                    out.append(line)
+                    line = word
+            if line:
+                out.append(line)
+            return out
+
+        avail = W - L - R
+        y = H - 20 * mm
+        canvas.setFillColor(_hex(WHITE))
+        canvas.setFont("Helvetica-Bold", 21)
+        for ln in wrapped(title, "Helvetica-Bold", 21, avail):
+            canvas.drawString(L, y, ln)
+            y -= 9.6 * mm
+        y -= 1.5 * mm
+        canvas.setFillColor(_hex("#BEE7F7"))       # pale Snowflake blue on navy
+        canvas.setFont("Helvetica", 11.5)
+        for ln in wrapped(subtitle, "Helvetica", 11.5, avail):
+            canvas.drawString(L, y, ln)
+            y -= 5.6 * mm
         canvas.restoreState()
 
     def draw_body(canvas, doc):
@@ -1946,28 +2013,19 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
     story = []
 
     # ── cover ─────────────────────────────────────────────────────────────
-    story.append(Spacer(1, 40 * mm))  # push below header strip
+    # Title and subtitle are painted onto the strip by draw_cover. The story
+    # starts below it, so everything from here down is dark text on white.
+    story.append(Spacer(1, 42 * mm))
 
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.enums import TA_LEFT
 
-    cover_title_style = ParagraphStyle(
-        "ctitle", fontName="Helvetica-Bold", fontSize=22,
-        textColor=_hex(WHITE), leading=30, spaceAfter=6,
-    )
-    cover_sub_style = ParagraphStyle(
-        "csub", fontName="Helvetica", fontSize=13,
-        textColor=_hex(LIGHT), leading=18, spaceAfter=4,
-    )
     cover_meta_style = ParagraphStyle(
         "cmeta", fontName="Helvetica", fontSize=9,
-        textColor=_hex(MID), leading=13,
+        textColor=_hex(SLATE), leading=13,
     )
 
-    story.append(Paragraph(title, cover_title_style))
-    story.append(Paragraph(subtitle, cover_sub_style))
-    story.append(Spacer(1, 6 * mm))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=_hex(RULE)))
+    story.append(HRFlowable(width="100%", thickness=0.8, color=_hex(BLUE)))
     story.append(Spacer(1, 4 * mm))
     story.append(Paragraph(BUILD_DATE, cover_meta_style))
     story.append(Paragraph(
@@ -1978,10 +2036,10 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
     story.append(Spacer(1, 8 * mm))
 
     abstract_style = ParagraphStyle(
-        "abstract", fontName="Helvetica", fontSize=10,
-        textColor=_hex(SLATE), leading=15, spaceAfter=6, alignment=TA_LEFT,
+        "abstract", fontName="Helvetica", fontSize=10.5,
+        textColor=_hex(TEXT), leading=16, spaceAfter=6, alignment=TA_LEFT,
     )
-    story.append(Paragraph(abstract, abstract_style))
+    story.append(Paragraph(_esc(abstract), abstract_style))
 
     # ── body pages ────────────────────────────────────────────────────────
     from reportlab.platypus import NextPageTemplate
@@ -2059,11 +2117,11 @@ def gen_exec_summary(out_path: Path) -> int:
     )
 
     for section in ES_SECTIONS:
-        story.append(Paragraph(section["heading"], h1))
+        story.append(Paragraph(_esc(section["heading"]), h1))
         story.append(HRFlowable(width="100%", thickness=0.6, color=_hex(BLUE), spaceAfter=4))
         for kind, content in section["body"]:
             if kind == "para":
-                story.append(Paragraph(content, styles["body"]))
+                story.append(Paragraph(_esc(content), styles["body"]))
             elif kind == "warn":
                 story.append(_make_warn_block(content, usable_w, styles))
                 story.append(Spacer(1, 3 * mm))
@@ -2460,7 +2518,7 @@ def gen_deck(out_path: Path, slides: list | None = None) -> int:
             # header row
             x = Inches(0.45)
             for ci, (hdr, cw) in enumerate(zip(headers, col_px)):
-                _cell(slide, hdr, x, y, cw, row_h, BLUE, WHITE, bold_=True)
+                _cell(slide, hdr, x, y, cw, row_h, NAVY, WHITE, bold_=True)
                 x += cw
             y += row_h
 
