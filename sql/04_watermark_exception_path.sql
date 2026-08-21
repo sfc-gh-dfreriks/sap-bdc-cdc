@@ -8,24 +8,41 @@
      2. the target is outside Snowflake, and a dynamic table cannot push to it
 
    Everywhere else, use 02_dynamic_table_engine.sql. This path is strictly worse in
-   one important respect: it CANNOT DETECT PHYSICAL DELETES. A BDC share carries no
-   change-mode column - no ODQ_CHANGEMODE, RECORDMODE or UPDKZ - so a row that the
-   share stops carrying leaves no trace for a watermark to find. A dynamic table
-   detects the same event, because it diffs source snapshots rather than reading a
-   flag.
+   one important respect: on a CUSTOM data product it CANNOT DETECT PHYSICAL
+   DELETES. Such a share carries no change-mode column - no ODQ_CHANGEMODE,
+   RECORDMODE or UPDKZ - so a row that the share stops carrying leaves no trace for
+   a watermark to find. A dynamic table detects the same event, because it diffs
+   source snapshots rather than reading a flag.
 
-   If you adopt this path, schedule the reconciliation query at the bottom.
+   STANDARD data products are different and this file is not the right place for
+   them. They do carry a change-mode column, `__OPERATION_TYPE`, so a delete could
+   in principle be applied - but on the reference share only 'L' and 'A' were ever
+   observed and no delete code appeared at all, and the authoritative value list
+   could not be confirmed from SAP documentation. Use 05_standard_product_track.sql
+   for those objects: the watermark there is TEXT and has to be compared as text to
+   stay cheap, which the procedure below does not do.
+
+   Either way, deletes are the weak point of the watermark path. If you adopt it,
+   schedule the reconciliation query at the bottom - it is not optional.
    ========================================================================== */
 
 /* ---------------------------------------------------------------------------
    Register the object. MERGE_KEY_COLUMNS must come from a verified grain, not a
    guess: a catalog-linked table declares no primary key, and getting the grain
    wrong here duplicates rows or discards real records without any error.
+
+   TRACK = 'CUSTOM' because this object carries a source-system extension
+   timestamp rather than the connector's own metadata columns. On a standard data
+   product register with TRACK = 'STANDARD' and use sql/05 instead: the watermark
+   there is text and must be compared as text to stay cheap, and an operation
+   column is available. The column is NOT NULL and constrained, so this cannot be
+   left unset by accident.
    --------------------------------------------------------------------------- */
 INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
-  (OBJECT_NAME, SOURCE_FQN, WATERMARK_COLUMN, MERGE_KEY_COLUMNS, LAST_WATERMARK)
+  (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, MERGE_KEY_COLUMNS, LAST_WATERMARK)
 SELECT 'SO_ITEM',
        '<L1_DB>.<L1_SCHEMA>.SALES_ORDER_ITEM',
+       'CUSTOM',
        'ZZLASTCHGDATE',
        'SALESDOCUMENT,SALESDOCUMENTITEM',
        NULL

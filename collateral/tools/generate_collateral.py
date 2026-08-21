@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 OUT_DIR    = Path(__file__).resolve().parent.parent   # collateral/
+ASSETS_DIR = OUT_DIR.parent / "assets" / "diagrams"   # the repo's own diagrams
 BUILD_DATE = "August 2026"
 
 FILENAMES = {
@@ -612,6 +613,46 @@ WP_SECTIONS = [
 ]
 
 
+# The repository's own diagrams, attached to the sections they illustrate. Kept as
+# a mapping rather than inline in WP_SECTIONS so prose and artwork can be edited
+# independently, and so that a checkout without assets/ still produces a readable
+# text-only document instead of failing.
+#
+# Captions follow the descriptions the README already uses for these images, so the
+# paper and the repository describe the same picture the same way.
+WP_FIGURES: dict[str, list[tuple[str, str]]] = {
+    "1.  Overview": [
+        ("D1_problem.png",
+         "Figure 1. The problem capture is asked to solve."),
+        ("D3_architecture.png",
+         "Figure 2. Where capture sits between the SAP share and the Gold layer."),
+    ],
+    "2.  Why standard CDC is unavailable": [
+        ("D2_capability.png",
+         "Figure 3. What the platform permits on a catalog-linked share."),
+    ],
+    "4.  Track 1 - Custom data products": [
+        ("D4_connector_writes.png",
+         "Figure 4. The connector write pattern the watermark depends on."),
+        ("D5_cost.png",
+         "Figure 5. Scan cost: a watermark predicate against a full read."),
+    ],
+    "9.  Decision guide": [
+        ("D6_decision.png",
+         "Figure 6. Choosing a mechanism."),
+    ],
+    "10.  Open asks to SAP": [
+        ("D7_gaps.png",
+         "Figure 7. What capture does not solve."),
+    ],
+}
+
+for _section in WP_SECTIONS:
+    for _file, _caption in WP_FIGURES.get(_section["heading"], []):
+        _section["body"].append(
+            ("figure", {"file": _file, "caption": _caption, "width": 0.90})
+        )
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Content - Executive Summary
 # ═══════════════════════════════════════════════════════════════════════════
@@ -966,6 +1007,43 @@ SLIDES = [
 ]
 
 
+# Diagram slides, spliced in after the slide they illustrate. Each diagram gets its
+# own slide: the rest of the deck is one idea per slide, and a diagram shrunk to sit
+# beside six bullets is readable from nowhere.
+#
+# Deliberately a subset. All seven diagrams appear in the white paper, where a
+# reader can study them; a deck that stops to show every picture stops being a
+# walkthrough. D4 (connector writes) and D7 (gaps) are the two left out.
+DECK_FIGURES: list[tuple[str, str, str]] = [
+    ("The challenge",
+     "D1_problem.png", "The problem capture is asked to solve."),
+    ("Why standard CDC is refused",
+     "D2_capability.png", "What the platform permits on a catalog-linked share."),
+    ("Two tracks, one engine",
+     "D3_architecture.png", "Where capture sits between the SAP share and the Gold layer."),
+    ("Track 1 - Custom data products",
+     "D5_cost.png", "Scan cost: a watermark predicate against a full read."),
+    ("Decision guide",
+     "D6_decision.png", "Choosing a mechanism."),
+]
+
+for _after_title, _file, _caption in DECK_FIGURES:
+    for _i, _slide_spec in enumerate(SLIDES):
+        if _slide_spec.get("title") == _after_title:
+            SLIDES.insert(_i + 1, {
+                "type": "figure",
+                "title": _after_title,
+                "file": _file,
+                "caption": _caption,
+            })
+            break
+    else:
+        raise SystemExit(
+            f"DECK_FIGURES refers to a slide that does not exist: {_after_title!r}. "
+            "Retitling a slide without updating this list would silently drop the "
+            "diagram, so this is fatal rather than a warning."
+        )
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PDF infrastructure
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1014,7 +1092,49 @@ def _build_styles(body_size: float = 9.5):
         "td", fontName="Helvetica", fontSize=8.5,
         textColor=_hex(TEXT), leading=12,
     )
+    s["caption"] = ParagraphStyle(
+        "caption", fontName="Helvetica-Oblique", fontSize=8,
+        textColor=_hex(SLATE), spaceBefore=0, spaceAfter=0, leading=11,
+        alignment=TA_CENTER,
+    )
     return s
+
+
+def _make_figure(spec, page_w, styles):
+    """Embed one of the repo's diagrams, scaled to the text width.
+
+    The diagrams in assets/diagrams are the same ones the README refers to, so the
+    collateral and the repository show the reader the same pictures.
+
+    A missing file is skipped rather than fatal. The generator has to stay runnable
+    in a checkout where assets/ was not fetched, and a white paper with one diagram
+    absent is more useful than a build that refuses to produce anything.
+    """
+    from reportlab.platypus import Image, Paragraph, Spacer, KeepTogether
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+
+    path = ASSETS_DIR / spec["file"]
+    if not path.is_file():
+        print(f"    note: diagram not found, skipping: {path.name}")
+        return []
+
+    iw, ih = ImageReader(str(path)).getSize()
+    w = page_w * float(spec.get("width", 1.0))
+    h = w * ih / iw
+    # Cap the height so a tall diagram cannot crowd its own caption onto the next
+    # page, which KeepTogether would otherwise resolve by pushing both.
+    max_h = float(spec.get("max_h_mm", 100)) * mm
+    if h > max_h:
+        h, w = max_h, max_h * iw / ih
+
+    img = Image(str(path), width=w, height=h)
+    img.hAlign = "CENTER"
+    group = [Spacer(1, 1 * mm), img]
+    if spec.get("caption"):
+        group += [Spacer(1, 1.5 * mm), Paragraph(spec["caption"], styles["caption"])]
+    group.append(Spacer(1, 4 * mm))
+    return [KeepTogether(group)]
 
 
 def _make_table(headers, rows, col_frac, page_w, styles):
@@ -1114,6 +1234,8 @@ def _section_to_flowables(section, page_w, styles):
         elif kind == "code":
             items.append(_make_code_block(content, page_w, styles))
             items.append(Spacer(1, 3 * mm))
+        elif kind == "figure":
+            items.extend(_make_figure(content, page_w, styles))
         elif kind == "table":
             td = content
             tbl = _make_table(
@@ -1696,6 +1818,39 @@ def gen_deck(out_path: Path) -> int:
                 font_name="Calibri", font_size=11, bold=True,
                 color_hex=NAVY, align="left", v_anchor="middle",
             )
+
+        elif stype == "figure":
+            # A diagram gets its own slide rather than being squeezed alongside
+            # bullets. One idea per slide is the rule for the rest of the deck and
+            # a shrunk-to-fit diagram beside six lines of text is readable from
+            # nowhere.
+            slide = _slide()
+            _add_rect(slide, 0, 0, W, H, fill_hex=WHITE)
+            _title_bar(slide, s["title"])
+
+            path = ASSETS_DIR / s["file"]
+            if path.is_file():
+                avail_w = W - Inches(1.2)
+                avail_h = H - Inches(2.2)     # title bar above, caption below
+                pic = slide.shapes.add_picture(
+                    str(path), Inches(0.6), Inches(1.35), width=avail_w)
+                if pic.height > avail_h:
+                    # add_picture preserved the aspect ratio, so take it from the
+                    # shape rather than re-reading the file.
+                    ratio = pic.width / pic.height
+                    pic.height = int(avail_h)
+                    pic.width = int(avail_h * ratio)
+                pic.left = int((W - pic.width) / 2)
+                if s.get("caption"):
+                    _add_text(
+                        slide, s["caption"],
+                        Inches(0.6), H - Inches(0.78),
+                        W - Inches(1.2), Inches(0.5),
+                        font_name="Calibri", font_size=10, italic=True,
+                        color_hex=SLATE, align="center", v_anchor="middle",
+                    )
+            else:
+                print(f"    note: diagram not found, slide left blank: {path.name}")
 
         elif stype == "table":
             slide = _slide()

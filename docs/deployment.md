@@ -7,10 +7,13 @@ The SQL files run in order:
 ```
 sql/00_discover.sql                  find the share, the watermark, and prove it prunes
 sql/01_capture_control.sql           control schema: watermark state, refresh audit, baseline
-sql/02_dynamic_table_engine.sql      the capture engine - four verified query shapes
+sql/02_dynamic_table_engine.sql      the capture engine - four verified query shapes (custom track)
 sql/03_monitoring.sql                reload detection, exceptions, alert
-sql/04_watermark_exception_path.sql  the exception path (only if dynamic tables cannot serve)
+sql/04_watermark_exception_path.sql  the watermark exception path (custom track)
+sql/05_standard_product_track.sql    the standard-product track: validation, polling, exception path
 ```
+
+Steps 1 and 2 apply to both tracks. Steps 3-6 are the custom-track path. Step 7 is the standard-track path. Deploy only the track or tracks your share carries.
 
 ---
 
@@ -42,13 +45,13 @@ GRANT SELECT ON ALL VIEWS  IN SCHEMA <L2_DB>.CAPTURE_CONTROL TO ROLE <OPS_ROLE>;
 GRANT SELECT ON ALL TABLES IN SCHEMA <L2_DB>.CAPTURE_CONTROL TO ROLE <OPS_ROLE>;
 ```
 
-These grants are included at the end of `sql/01_capture_control.sql`.
+These grants are included at the end of `sql/01_capture_control.sql` and `sql/05_standard_product_track.sql`.
 
 ---
 
 ## Step 1 - Run the readiness assessment
 
-Before deploying anything, run the readiness probe against your tenant. It confirms whether the mechanisms will work on your specific share, and it will find the watermark column name, which you will need for subsequent steps.
+Before deploying anything, run the readiness probe against your tenant. It classifies each object by track (standard or custom), validates standard metadata where present, confirms whether the mechanisms will work on your specific share, and discovers the watermark column name and form needed for subsequent steps.
 
 ```bash
 cd probes
@@ -67,9 +70,9 @@ Add `--with-scratch-tests` to verify the dynamic table incremental refresh direc
 | `NOT READY` | A critical check failed. The connector appears to reload, no watermark column was found, or the share is absent. | Do not deploy. Understand the cause before continuing. |
 | `NOT ASSESSABLE` | A probe could not run, usually due to insufficient privilege or no catalog-linked database found. | Resolve the access issue and re-run. |
 
-The checks the probe runs correspond to the discovery steps in `sql/00_discover.sql`: share present, share inventory, watermark column present, connector write pattern, pruning ratio, and dynamic table incremental acceptance.
+The checks the probe runs correspond to the discovery steps in `sql/00_discover.sql`: share present, share inventory, change signal and track classification, standard metadata validation (standard track), connector write pattern (custom track), pruning ratio, and dynamic table incremental acceptance.
 
-A `NOT READY` result on `signal.merge_or_reload` is the most serious. The entire incremental pattern depends on the connector merging. If the connector reloads, the watermark path reads every row every cycle and dynamic tables become full-rebuild on every refresh - both are correct but expensive, and neither is incremental.
+A `NOT READY` result on `signal.merge_or_reload` is the most serious for the custom track. The entire custom-track incremental pattern depends on the connector merging. If the connector reloads, the watermark path reads every row every cycle and dynamic tables become full-rebuild on every refresh - both are correct but expensive, and neither is incremental.
 
 ---
 
@@ -79,7 +82,7 @@ Run `sql/01_capture_control.sql` in full. Substitute `<L2_DB>` with your Gold da
 
 | Object | Type | Purpose |
 | --- | --- | --- |
-| `WATERMARK` | Table | Watermark state for the exception path (step 6). Dynamic tables do not use it. |
+| `WATERMARK` | Table | Watermark state for the exception path (steps 6 and 7). Dynamic tables do not use it. The `TRACK` column distinguishes `'CUSTOM'` from `'STANDARD'`; objects on the two tracks use different watermark columns and comparison semantics. `LAST_WATERMARK` holds a parsed timestamp for the custom track; `LAST_WATERMARK_TEXT` holds the raw text value for the standard track, where comparisons must stay in text to preserve the zero-scan poll cost. `OPERATION_COLUMN` is populated for standard-track objects only. |
 | `VW_REFRESH_AUDIT` | View | Reads Snowflake's `DYNAMIC_TABLE_REFRESH_HISTORY()`. Used by monitoring and for manual verification. |
 | `CAPTURE_BASELINE` | Table | A snapshot of row counts and file counts captured once at deployment. Required to detect a future reload or Parquet compaction. |
 
@@ -102,7 +105,7 @@ The colon path operator is the correct approach and is used throughout the monit
 
 ---
 
-## Step 3 - Configure the dynamic tables
+## Step 3 - Configure the dynamic tables (custom track)
 
 Run `sql/02_dynamic_table_engine.sql`. Substitute `<L2_DB>`, `<L2_WH>`, `<L1_DB>`, and `<L1_SCHEMA>` with the names discovered in step 1. Use double quotes around schema and object names from the catalog-linked database.
 
@@ -210,7 +213,7 @@ LIMIT  20;
 **Healthy looks like:**
 
 - `REFRESH_ACTION = NO_DATA` in a few hundred milliseconds: nothing changed since the last connector write; Snowflake established that without reading the source data.
-- `REFRESH_ACTION = INCREMENTAL` with a `ROWS_INSERTED` count that is a small fraction of the total table size: the connector wrote new data and the dynamic table picked it up. Note that this state was not directly observed on the reference tenant in the available window - see the open questions in [how-it-works.md](how-it-works.md#open-questions).
+- `REFRESH_ACTION = INCREMENTAL` with a `ROWS_INSERTED` count that is a small fraction of the total table size: the connector wrote new data and the dynamic table picked it up. Note that this state was not directly observed on the custom-track reference tenant in the available window - see the open questions in [how-it-works.md](how-it-works.md#open-questions).
 
 **A problem looks like:**
 
@@ -228,7 +231,7 @@ An empty result means the capture pattern is healthy.
 
 ---
 
-## Step 6 - The exception path
+## Step 6 - The custom-track exception path
 
 Use `sql/04_watermark_exception_path.sql` only where a dynamic table cannot serve:
 
@@ -241,17 +244,20 @@ The exception path **cannot detect physical deletes**. A row that disappears fro
 
 ```sql
 INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
-  (OBJECT_NAME, SOURCE_FQN, WATERMARK_COLUMN, MERGE_KEY_COLUMNS, LAST_WATERMARK)
+  (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, MERGE_KEY_COLUMNS,
+   OPERATION_COLUMN, LAST_WATERMARK)
 SELECT 'SO_ITEM',
        '<L1_DB>.<L1_SCHEMA>.SALES_ORDER_ITEM',
+       'CUSTOM',
        'ZZLASTCHGDATE',
        'SALESDOCUMENT,SALESDOCUMENTITEM',
+       NULL,
        NULL
 WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
                    WHERE OBJECT_NAME = 'SO_ITEM');
 ```
 
-`MERGE_KEY_COLUMNS` is a required column with no default. Supplying the wrong grain silently produces duplicate rows or discards real records without any constraint violation.
+`MERGE_KEY_COLUMNS` is a required column with no default. Supplying the wrong grain silently produces duplicate rows or discards real records without any constraint violation. `TRACK` is required and must be `'CUSTOM'` for this path; the column has a CHECK constraint that rejects any other value.
 
 ### Procedure design decisions
 
@@ -261,6 +267,99 @@ Two decisions in `SP_CAPTURE_SO_ITEM` (in `sql/04`) are not incidental and shoul
 - **The range is closed at both ends** (`ZZLASTCHGDATE > :v_from AND ZZLASTCHGDATE <= :v_to`). This makes a failed run safe to repeat. An open upper bound would consume a different set of rows on each retry.
 
 On error, `LAST_WATERMARK` is left untouched. The next run repeats the same closed range rather than skipping it.
+
+---
+
+## Step 7 - Standard-track deployment
+
+Deploy this path for any object whose track classification from step 1 is `STANDARD`. Steps 1 and 2 must already be complete.
+
+### 7a - Deploy the standard-track procedures
+
+Run `sql/05_standard_product_track.sql`. Substitute `<L2_DB>` and `<WH>`. This creates in `<L2_DB>.CAPTURE_CONTROL`:
+
+| Object | Type | Purpose |
+| --- | --- | --- |
+| `STANDARD_VALIDATION` | Table | Validation results per object, written by `SP_VALIDATE_STANDARD`. Stores operation cardinality, max length, parse success count, and degenerate-row count. |
+| `SP_VALIDATE_STANDARD` | Procedure | Validates connector metadata on every registered STANDARD object against the thresholds derived from the clean-vs-corrupted contrast. Returns a summary and writes detail rows to `STANDARD_VALIDATION`. |
+| `SP_POLL_STANDARD` | Procedure | Checks whether the source watermark advanced since the last poll, refreshes the dependent dynamic table if it did, and updates `WATERMARK`. Poll is free (0.000 MB, answered from Iceberg manifest statistics) because it compares `__TIMESTAMP` as text. |
+| `VW_STANDARD_FRESHNESS` | View | Reports `MINUTES_BEHIND` per registered object, using `SYSDATE()` (UTC) rather than `CURRENT_TIMESTAMP()` (session-timezone-aware). |
+| `VW_STANDARD_OPERATION_MIX` | View | Latest validation result per object from `STANDARD_VALIDATION`. |
+
+### 7b - Create dynamic tables over the standard objects
+
+Standard-track dynamic tables follow the same rules as custom-track: `REFRESH_MODE = INCREMENTAL`, explicit `TARGET_LAG`, no non-deterministic expressions. Create one dynamic table per object you want to capture, reading from the live catalog-linked database.
+
+```sql
+CREATE OR REPLACE DYNAMIC TABLE <L2_DB>.<SCHEMA>.DT_CUSTOMER
+  TARGET_LAG = '15 minutes'
+  WAREHOUSE  = <WH>
+  REFRESH_MODE = INCREMENTAL
+AS
+SELECT *
+FROM   "<LINKED_DB>"."<LINKED_SCHEMA>"."<OBJECT_NAME>";
+```
+
+Confirm incremental acceptance after creation:
+
+```sql
+SHOW DYNAMIC TABLES IN SCHEMA <L2_DB>.<SCHEMA>;
+-- check: refresh_mode = INCREMENTAL, refresh_mode_reason IS NULL
+```
+
+### 7c - Register objects in WATERMARK
+
+```sql
+INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
+  (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, OPERATION_COLUMN,
+   MERGE_KEY_COLUMNS, LAST_WATERMARK_TEXT)
+SELECT 'CUSTOMER',
+       '"<LINKED_DB>"."<LINKED_SCHEMA>"."<OBJECT_NAME>"',
+       'STANDARD',
+       '__TIMESTAMP',
+       '__OPERATION_TYPE',
+       '<KEY_COLUMN_1>,<KEY_COLUMN_2>',
+       NULL
+WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
+                   WHERE OBJECT_NAME = 'CUSTOMER');
+```
+
+`WATERMARK_COLUMN` must be `'__TIMESTAMP'` (the fixed-name column, two leading underscores). `OPERATION_COLUMN` must be `'__OPERATION_TYPE'`. `LAST_WATERMARK_TEXT` is the comparison column for this track - it stores the raw text value and is never parsed for comparison, only for display in `VW_STANDARD_FRESHNESS`.
+
+### 7d - Validate before scheduling anything
+
+```sql
+CALL <L2_DB>.CAPTURE_CONTROL.SP_VALIDATE_STANDARD();
+```
+
+Read the result. All registered objects must return `USABLE` before you schedule any capture. An `UNUSABLE` result means the metadata columns are not clean change codes - most commonly because the `SOURCE_FQN` points at a local copy of the data product rather than the live catalog-linked database.
+
+```sql
+SELECT OBJECT_NAME, VERDICT, FAULTS, OPERATION_CARD, OPERATION_MAX_LEN,
+       TIMESTAMPS_PARSED, DEGENERATE_ROWS
+FROM   <L2_DB>.CAPTURE_CONTROL.VW_STANDARD_OPERATION_MIX
+ORDER  BY VERDICT DESC, OBJECT_NAME;
+```
+
+Do not proceed past this step with any `UNUSABLE` object.
+
+### 7e - Schedule SP_POLL_STANDARD per object
+
+Create one task per registered object. `SP_POLL_STANDARD` takes two parameters: the `OBJECT_NAME` from `WATERMARK`, and the fully-qualified dynamic table name to refresh if the watermark advanced.
+
+```sql
+CREATE OR REPLACE TASK <L2_DB>.CAPTURE_CONTROL.TSK_POLL_CUSTOMER
+  WAREHOUSE = <WH>
+  SCHEDULE  = '15 minutes'
+AS
+CALL <L2_DB>.CAPTURE_CONTROL.SP_POLL_STANDARD(
+       'CUSTOMER',
+       '<L2_DB>.<SCHEMA>.DT_CUSTOMER');
+```
+
+Leave tasks **suspended** until you have verified step 7d. Resume with `ALTER TASK ... RESUME` once validation is clean.
+
+The poll itself is free (answered from Iceberg manifest statistics). The cost of running the task scheduler on a 15-minute cadence is the warehouse resume cost for the brief procedure execution, not a data scan.
 
 ---
 
@@ -278,3 +377,8 @@ On error, `LAST_WATERMARK` is left untouched. The next run repeats the same clos
 | Target has more rows than source (watermark path) | Physical deletes upstream not visible on watermark path | `VW_DELETE_RECONCILIATION`; rebuild the target table |
 | `TRY_PARSE_JSON` error on `STATISTICS` | `STATISTICS` column is type `OBJECT`, not `VARCHAR` | Use colon path operator: `STATISTICS:numInsertedRows::NUMBER` |
 | Merge produces unexpected duplicates | Wrong grain supplied to `MERGE_KEY_COLUMNS` | Verify the full key against SAP documentation; see `sql/01_capture_control.sql` comment on EKBE |
+| `SP_VALIDATE_STANDARD` returns `UNUSABLE` | Metadata corruption; `SOURCE_FQN` likely points at a local copy, not the live catalog-linked database | `CAPTURE_CONTROL.STANDARD_VALIDATION.FAULTS`; verify `SOURCE_FQN` resolves to a database with `kind = 'CATALOG-LINKED DATABASE'`; look for the `load_type_<hash>` column name (hash suffix is absent on copies) |
+| `__TIMESTAMP` parses as NULL everywhere | Comma decimal separator; `TRY_TO_TIMESTAMP_NTZ` silently returns NULL without the `REPLACE` | Use `TRY_TO_TIMESTAMP_NTZ(REPLACE(col, ',', '.'))` for any display context; comparisons should stay as raw text |
+| `SP_POLL_STANDARD` returns `NOT REGISTERED` | Object not in `WATERMARK` with `TRACK = 'STANDARD'` | Run the INSERT in step 7c |
+| `VW_STANDARD_FRESHNESS` shows negative lag | `CURRENT_TIMESTAMP()` is session-timezone-aware; mixing with a UTC watermark reports wrong lag | `VW_STANDARD_FRESHNESS` uses `SYSDATE()` (UTC as NTZ); any custom query computing lag must do the same |
+| `DESCRIBE TABLE` fails with `is not initialized` | Share advertises a table that was never materialised (`refresh_table`) | Tolerate the per-object error; the probe handles this already; the object cannot be captured until SAP initialises it |

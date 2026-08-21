@@ -20,27 +20,61 @@ Capture is a platform mechanism layered over the share. The content of the share
 
 ## Limitations
 
-### Physical delete detection on the watermark path
+### Standard track: operation column value enumeration not confirmed
 
 **Severity: high.**
 
-The SAP BDC share carries no change-mode column. There is no `ODQ_CHANGEMODE`, `RECORDMODE`, or `UPDKZ`. A row that disappears from the source leaves no trace in the data. The watermark window will never encounter it.
+`__OPERATION_TYPE` exists on standard data product objects and its presence is the primary reason to prefer the standard track over the custom track. However, the authoritative value enumeration could not be confirmed. On the reference share (CUSTOMER_V1, 67,480 rows across 5 non-empty objects), only two values were observed: `L` (initial load) and `A` (delta after-image). No delete code appeared anywhere.
+
+Whether this product ever emits a delete code is unverified. The MERGE exception path in `sql/05_standard_product_track.sql` includes a commented DELETE branch that activates if a delete code is observed, and requires the count reconciliation query regardless. Do not assume the absence of observed delete codes means deletes will never arrive; schedule reconciliation as if they might.
+
+### Standard track: metadata corruption on local copies
+
+**Severity: high.**
+
+The connector metadata columns (`__OPERATION_TYPE`, `__TIMESTAMP`, `load_type`, `run_id`) were clean inside every live catalog-linked database examined. Every local copy of a standard product on the same account carried corrupted metadata: operation columns holding media titles or customer identifiers, all three metadata columns holding the same value on every row, `RUN_ID` null throughout. The corruption propagates into downstream medallion layers. None of it fails loudly; it produces wrong incremental results without raising any error.
+
+The practical rule is to point capture at the catalog-linked database itself, never at a copy of it. Run `SP_VALIDATE_STANDARD` before scheduling anything. The `load_type_<hash>` column name carries the 32-character hex flow hash on a genuine live share; plain `LOAD_TYPE` without the suffix is a reliable marker that you are reading a copy.
+
+### Standard track: `__TIMESTAMP` arrives as TEXT with a comma decimal separator
+
+**Severity: medium.**
+
+The format is `2026-06-15T09:41:59,6426580Z` - ISO-8601 with a comma in place of the fractional seconds decimal point. `TRY_TO_TIMESTAMP_NTZ` does not error on this format; it returns NULL for every row. An unguarded cast looks like an empty column rather than a format mismatch. The correct parse requires `REPLACE(col, ',', '.')` first. For comparison and polling, no parse is needed: the format is fixed-width and zero-padded, so lexicographic order is chronological order, and `MAX()` over the raw text is answered from Iceberg manifest statistics at zero scan cost.
+
+### Physical delete detection on the custom-track watermark path
+
+**Severity: high.**
+
+The custom-track share carries no change-mode column. There is no `ODQ_CHANGEMODE`, `RECORDMODE`, or `UPDKZ`. A row that disappears from the source leaves no trace in the data. The watermark window will never encounter it.
 
 On the watermark path, the only available detection is a count comparison between source and target (`VW_DELETE_RECONCILIATION` in `sql/04_watermark_exception_path.sql`). A persistent positive divergence means rows were deleted upstream. Identifying which rows were deleted is impractical; rebuilding the target is the recommended response.
 
 Dynamic tables handle physical deletes correctly by diffing consecutive source snapshots. This is the primary reason dynamic tables are the recommended path.
 
-### Watermark column name varies by pipeline implementation
+### `change_tracking = ON` is misleading on standard data product objects
+
+**Severity: low - operationally confusing.**
+
+`SHOW TABLES` reports `change_tracking = ON` on standard data product objects. Despite this, both streams (other than `INSERT_ONLY`) and the `CHANGES()` clause are still refused on the reference account with the same errors as on custom-track objects. The `ON` value does not confirm that Snowflake CDC mechanisms will work; it should not be used as the basis for a deployment decision.
+
+### Watermark column name varies by pipeline implementation (custom track)
 
 **Severity: medium.**
 
-The replication timestamp is a customer extension field added to the SAP source during SLT pipeline configuration. Its name - `ZZLASTCHGDATE` on the reference tenant - is set per BDC pipeline implementation. It may differ between data products on the same tenant, or be absent on a BDC deployment that was not configured to include it. The readiness assessment discovers the column name; do not assume a name.
+The replication timestamp on the custom track is a customer extension field added to the SAP source during SLT pipeline configuration. Its name - `ZZLASTCHGDATE` on the reference tenant - is set per BDC pipeline implementation. It may differ between data products on the same tenant, or be absent on a BDC deployment that was not configured to include it. The readiness assessment discovers the column name; do not assume a name.
 
 ### Grain not declared on catalog-linked tables
 
 **Severity: medium.**
 
-Catalog-linked tables carry no primary key constraint. The correct merge key for some SAP objects is not obvious from the column names. Purchase order history (EKBE) requires a seven-part key including `AccountAssignmentNumber` and `PurchasingHistoryCategory`. On a five-part key the table appears to hold duplicates, and de-duplicating on that key silently discards real goods movements without any error. Confirm the grain before writing any MERGE statement.
+Catalog-linked tables carry no primary key constraint. The correct merge key for some SAP objects is not obvious from the column names. Purchase order history (EKBE) requires a seven-part key including `AccountAssignmentNumber` and `PurchasingHistoryCategory`. On a five-part key the table appears to hold duplicates, and de-duplicating on that key silently discards real goods movements without any error. Confirm the grain before writing any MERGE statement. This applies to both tracks.
+
+### Uninitialised objects cannot be described
+
+**Severity: low - operationally inconvenient.**
+
+A share can advertise a table that was never materialised. `DESCRIBE TABLE` on such an object fails with `table 'refresh_table' is not initialized`. This is a property of the share rather than a fault in the caller. Tooling must tolerate the per-object failure and continue; the readiness probe (`cdc_readiness.py`) does this already. The object is recorded in the survey with its error, and the rest of the account-wide assessment continues.
 
 ### `INFORMATION_SCHEMA.COLUMNS` returns no rows
 
@@ -64,7 +98,7 @@ Schema names contain a colon (for example `"dp_finance_v2_srv:v1"`). Object name
 
 **Severity: low - latent.**
 
-The watermark's near-zero scan cost depends on per-file Iceberg statistics spanning a narrow range. If SAP compacts the underlying Parquet files - merging many small files into fewer large ones - the per-file ranges widen and file elimination degrades toward a full scan. The file count monitor in `sql/03_monitoring.sql` detects this. If it fires, re-run the pruning probe in `sql/00_discover.sql` to measure the new scan ratio. Dynamic table refreshes are unaffected because they do not depend on the watermark predicate.
+The watermark's near-zero scan cost on the custom track depends on per-file Iceberg statistics spanning a narrow range. If SAP compacts the underlying Parquet files - merging many small files into fewer large ones - the per-file ranges widen and file elimination degrades toward a full scan. The file count monitor in `sql/03_monitoring.sql` detects this. If it fires, re-run the pruning probe in `sql/00_discover.sql` to measure the new scan ratio. Dynamic table refreshes are unaffected because they do not depend on the watermark predicate. Predicate pruning on the standard track was not demonstrated on the reference objects (single micropartition), so compaction risk there is not assessed.
 
 ### Time travel limited to 24 hours
 
@@ -87,8 +121,9 @@ An INSERT_ONLY stream expires after 14 days if not consumed. A dynamic table doe
 | BDC connector switches from merge to reload | Dynamic table refreshes become as expensive as a full rebuild every cycle; no error is raised. Watermark procedure processes every row every cycle. Neither path produces incorrect results; cost and lag increase. | `VW_RELOAD_DETECTION.CAPTURE_MODE = 'FULL RELOAD DETECTED'`; hourly alert in `AL_CAPTURE_HEALTH`. |
 | Non-deterministic expression enters a dynamic table query | `REFRESH_ACTION` becomes `FULL` on every cycle; cost rises silently. No error is raised. | `VW_REFRESH_AUDIT.UNEXPECTED_FULL_REFRESH = TRUE`; `SHOW DYNAMIC TABLES` exposes `refresh_mode_reason`. |
 | Connector stops writing | Dynamic table continues to report `NO_DATA` and appears healthy. Downstream consumers receive stale data with no signal. | `VW_RELOAD_DETECTION.CAPTURE_MODE = 'CONNECTOR STALLED'` when `LAST_WRITE` exceeds the staleness threshold. |
-| Parquet compaction widens file ranges | Watermark predicate scan cost rises toward a full scan; no error is raised. Dynamic tables are unaffected. | `VW_CAPTURE_EXCEPTIONS` `FILE_COUNT_DROP` row; file count drops below 70% of the baseline. |
-| Wrong merge key chosen (watermark path) | Duplicate rows in the target, or real records silently discarded. No constraint violation is raised. | Row count comparison between source and target; business-level data quality audits. |
+| Parquet compaction widens file ranges | Watermark predicate scan cost rises toward a full scan (custom track); no error is raised. Dynamic tables are unaffected. | `VW_CAPTURE_EXCEPTIONS` `FILE_COUNT_DROP` row; file count drops below 70% of the baseline. |
+| Wrong merge key chosen (either track watermark path) | Duplicate rows in the target, or real records silently discarded. No constraint violation is raised. | Row count comparison between source and target; business-level data quality audits. |
+| Standard track metadata corruption enters the pipeline | Incremental merge produces wrong results silently; `__OPERATION_TYPE` does not contain change codes. | `SP_VALIDATE_STANDARD` / `VW_STANDARD_OPERATION_MIX`; re-run validation whenever the share is re-linked or a product is re-published. |
 
 ---
 
@@ -96,17 +131,39 @@ An INSERT_ONLY stream expires after 14 days if not consumed. A dynamic table doe
 
 These changes to BDC data products would make the pattern more reliable, close the delete gap, and reduce the risk of deployment errors.
 
-### 1. A guaranteed load timestamp on every object
+### 1. Authoritative enumeration and contract for `__OPERATION_TYPE`
 
-The replication timestamp is a customer extension field. It is absent on some deployments and may vary in name between data products on the same tenant. A first-class `_BDC_LOAD_TS` column with a guaranteed name on every shared object would remove the discovery step, make the readiness assessment unnecessary, and give all consumers a consistent watermark predicate.
+The value enumeration for `__OPERATION_TYPE` could not be confirmed from available documentation. On the reference share, only `L` (initial load) and `A` (delta after-image) were observed. The specific open questions are:
 
-### 2. A change-mode column on every object
+- What is the full set of valid values, and what does each mean?
+- Is a delete code ever emitted, and if so, what is it?
+- Is the set stable across data product versions and connector releases?
 
-Without a column that distinguishes insert, update, and delete at row level, physical deletes are undetectable on the watermark path. An `_BDC_CHANGE_MODE` column - equivalent to `RECORDMODE` in classic SAP delta queues - would close this gap for the watermark path without requiring dynamic table snapshot diffing. It would also allow streams to report deletes if Snowflake adds support for `METADATA$ACTION` on externally catalogued Iceberg (see Snowflake ask 1 below).
+Without an authoritative answer, the MERGE exception path cannot safely omit the DELETE branch, and reconciliation is required on every schedule cycle rather than as a precaution. A machine-readable contract - or at minimum a versioned reference document per data product type - would close this gap.
 
-### 3. Documented grain and primary key per object
+### 2. `__TIMESTAMP` as a real timestamp, not TEXT
 
-Catalog-linked tables carry no primary key constraint. For most objects, the business key is published in SAP documentation. For several it is not obvious. A machine-readable key specification in the data product metadata, or a supplementary reference document covering every object in each data product, would prevent silent merge key errors.
+`__TIMESTAMP` arrives as `TEXT` with a comma decimal separator (`2026-06-15T09:41:59,6426580Z`). `TRY_TO_TIMESTAMP_NTZ` silently returns NULL on this format without the `REPLACE` workaround. Delivering it as `TIMESTAMP_NTZ` or as ISO-8601 with a standard period separator would eliminate a silent data-loss risk and allow the column to be used directly in typed comparisons.
+
+### 3. Clarification on `change_tracking = ON`
+
+`SHOW TABLES` reports `change_tracking = ON` on standard data product objects, but streams (other than `INSERT_ONLY`) and the `CHANGES()` clause are still refused with standard external-catalog errors. A clear statement of what `change_tracking = ON` means on these objects - and whether it represents a future capability rather than a current one - would prevent misinterpretation during deployment.
+
+### 4. A guaranteed load timestamp on every object (custom track)
+
+The replication timestamp on the custom track is a customer extension field. It is absent on some deployments and may vary in name between data products on the same tenant. A first-class `_BDC_LOAD_TS` column with a guaranteed name on every shared object would remove the discovery step, make the readiness assessment unnecessary, and give all consumers a consistent watermark predicate.
+
+### 5. A change-mode column on every custom-track object
+
+Without a column that distinguishes insert, update, and delete at row level, physical deletes are undetectable on the custom-track watermark path. An `_BDC_CHANGE_MODE` column - equivalent to `RECORDMODE` in classic SAP delta queues - would close this gap for the watermark path without requiring dynamic table snapshot diffing.
+
+### 6. Documented grain and primary key per object
+
+Catalog-linked tables carry no primary key constraint. For most objects, the business key is published in SAP documentation. For several it is not obvious. A machine-readable key specification in the data product metadata, or a supplementary reference document covering every object in each data product, would prevent silent merge key errors. This applies to both tracks.
+
+### 7. Guidance on uninitialised objects
+
+A share can advertise a table (`refresh_table` was observed) that has never been materialised and cannot be described. The current behaviour - `DESCRIBE TABLE` fails with `table 'X' is not initialized` - is recoverable if the caller handles it, but it is not documented. Guidance on what `refresh_table` represents, whether it is expected to initialise, and how to detect the condition programmatically would help consumers build robust account-wide surveys.
 
 ---
 
@@ -124,7 +181,7 @@ A read-only `CHANGES()` implementation that reads Iceberg snapshot metadata - wi
 
 Currently refused with: *change_tracking cannot be set for Iceberg tables unless they use Snowflake catalog.*
 
-Even a read-only implementation that consumes existing Iceberg snapshot history, rather than writing CDC metadata, would allow streams to expose `METADATA$ACTION` and `METADATA$ISUPDATE` to consumers. This would also enable the delete detection that `_BDC_CHANGE_MODE` would otherwise provide.
+Even a read-only implementation that consumes existing Iceberg snapshot history, rather than writing CDC metadata, would allow streams to expose `METADATA$ACTION` and `METADATA$ISUPDATE` to consumers. This would also enable delete detection that `_BDC_CHANGE_MODE` would otherwise provide on the custom track.
 
 ### 3. Longer time travel on catalog-linked shares
 
@@ -138,14 +195,12 @@ The current options are INSERT_ONLY streams (no deletes, 14-day expiry, no stand
 
 ## Open questions
 
-Two things were not observable in the five-day reference window. They are stated here as open, not settled. Both appear in [how-it-works.md](how-it-works.md#open-questions); they are repeated here because their resolution affects the confidence level of the pattern.
+Two things were not observable in the reference measurement windows. They are stated here as open, not settled. Both appear in [how-it-works.md](how-it-works.md#open-questions); they are repeated here because their resolution affects the confidence level of the pattern.
 
-**1. What a changed-source dynamic table refresh produces.**
+**1. The authoritative `__OPERATION_TYPE` value enumeration (standard track).**
 
-Initial refresh was `INCREMENTAL`. A no-change refresh returned `NO_DATA`. A refresh following a genuine connector write was not observed. The expected behaviour is `REFRESH_ACTION = INCREMENTAL` with `ROWS_INSERTED` matching the changed row count. If instead `REFRESH_ACTION = FULL` is observed, the pattern's cost model changes: each refresh after a connector write would scan the full object. The fallback in that case is the watermark path in `sql/04_watermark_exception_path.sql`, whose cost is measured.
+Only `L` and `A` were observed. Whether the product ever emits a delete code is unknown. The probe discovers the actual distribution per tenant rather than assuming it. Resolution requires confirmation from SAP per data product type.
 
-To confirm: after your next connector write, query `VW_REFRESH_AUDIT` and record the result.
+**2. What a changed-source dynamic table refresh produces on a production-scale custom-track object.**
 
-**2. Whether an INSERT_ONLY stream yields rows after a source change.**
-
-The stream was created and returned zero rows at creation. A subsequent connector write was not exercised against it. This only matters if the stream path is adopted, which is not the recommendation. Resolution is low priority unless a stream-based integration with an external target is being considered.
+On the standard track, `INCREMENTAL SUCCEEDED` was observed after a watermark advance (3,355-row table, 5,241 ms). The equivalent on a multi-million-row custom-track object was not observed in the available window. To confirm: after your next connector write on the custom track, query `VW_REFRESH_AUDIT` and record the result.

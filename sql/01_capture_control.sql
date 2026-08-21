@@ -23,17 +23,40 @@ CREATE SCHEMA IF NOT EXISTS <L2_DB>.CAPTURE_CONTROL
       assignment number and the history category; on a five-part key it appears
       to hold duplicates, and de-duplicating on that key silently discards real
       goods movements.
+
+      TRACK records which change signal the object carries, because the two are
+      not interchangeable:
+
+        CUSTOM    a source-system extension timestamp, typically ZZLASTCHGDATE,
+                  already typed as TIMESTAMP_NTZ. No operation column, so a
+                  delete in the source is indistinguishable from no change.
+        STANDARD  the connector's own __TIMESTAMP, which arrives as TEXT in
+                  ISO-8601 with a comma decimal separator
+                  (2026-06-15T09:41:59,6426580Z).
+
+      Hence two watermark columns rather than one. LAST_WATERMARK_TEXT is not a
+      convenience: on the standard track the comparison must stay in text.
+      MAX() over the raw column is answered from Iceberg manifest statistics and
+      scans nothing, while MAX() over a parsed expression reads the object -
+      measured at 0.000 MB against 0.310 MB on a small reference table, and the
+      gap grows with the object. The format is fixed-width and zero-padded, so
+      lexicographic order is chronological order and comparing as text is
+      correct as well as cheap. Parse it for display, never for comparison.
    --------------------------------------------------------------------------- */
 CREATE TABLE IF NOT EXISTS <L2_DB>.CAPTURE_CONTROL.WATERMARK (
-  OBJECT_NAME        VARCHAR       NOT NULL PRIMARY KEY,
-  SOURCE_FQN         VARCHAR       NOT NULL,
-  WATERMARK_COLUMN   VARCHAR       NOT NULL,
-  MERGE_KEY_COLUMNS  VARCHAR       NOT NULL,
-  LAST_WATERMARK     TIMESTAMP_NTZ,
-  LAST_RUN_STARTED   TIMESTAMP_NTZ,
-  LAST_RUN_ROWS      NUMBER,
-  LAST_RUN_STATUS    VARCHAR,
-  UPDATED_AT         TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+  OBJECT_NAME          VARCHAR       NOT NULL PRIMARY KEY,
+  SOURCE_FQN           VARCHAR       NOT NULL,
+  TRACK                VARCHAR       NOT NULL
+      CONSTRAINT CK_WATERMARK_TRACK CHECK (TRACK IN ('CUSTOM', 'STANDARD')),
+  WATERMARK_COLUMN     VARCHAR       NOT NULL,
+  MERGE_KEY_COLUMNS    VARCHAR       NOT NULL,
+  OPERATION_COLUMN     VARCHAR,          -- STANDARD only; NULL on the custom track
+  LAST_WATERMARK       TIMESTAMP_NTZ,    -- CUSTOM track
+  LAST_WATERMARK_TEXT  VARCHAR,          -- STANDARD track, compared as text
+  LAST_RUN_STARTED     TIMESTAMP_NTZ,
+  LAST_RUN_ROWS        NUMBER,
+  LAST_RUN_STATUS      VARCHAR,
+  UPDATED_AT           TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
 /* ---------------------------------------------------------------------------
