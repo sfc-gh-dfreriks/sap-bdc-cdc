@@ -279,6 +279,7 @@ gaps worth raising with Snowflake product management.
 | [docs/deployment.md](docs/deployment.md) | Step-by-step, with the checks to run at each stage |
 | [docs/gaps-and-asks.md](docs/gaps-and-asks.md) | Limitations, open questions, and product asks |
 | [collateral/SAP_BDC_CDC_White_Paper.pdf](collateral/SAP_BDC_CDC_White_Paper.pdf) | The self-contained version of all three, with diagrams and the step-by-step build |
+| [collateral/SAP_BDC_CDC_Enablement_Recommendation.pdf](collateral/SAP_BDC_CDC_Enablement_Recommendation.pdf) | What to ask for when configuring a data product for capture — the standard four columns scored one by one, and why the highest-value action needs nothing from SAP |
 
 ## Repository layout
 

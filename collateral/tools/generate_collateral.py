@@ -25,6 +25,7 @@ FILENAMES = {
     "white-paper":  "SAP_BDC_CDC_White_Paper.pdf",
     "exec-summary": "SAP_BDC_CDC_Executive_Summary.pdf",
     "deck":         "SAP_BDC_CDC_Solution_Overview.pptx",
+    "recommendation": "SAP_BDC_CDC_Enablement_Recommendation.pdf",
 }
 
 # ── palette (blue / slate / grey - no Mosaic green) ───────────────────────
@@ -652,6 +653,374 @@ for _section in WP_SECTIONS:
         _section["body"].append(
             ("figure", {"file": _file, "caption": _caption, "width": 0.90})
         )
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Content - CDC Enablement Recommendation
+# ═══════════════════════════════════════════════════════════════════════════
+
+REC_TITLE    = "Enabling Change Data Capture on SAP BDC Data Products"
+REC_SUBTITLE = "What the standard configuration teaches, and what to ask for on a custom one"
+
+REC_SECTIONS = [
+    {
+        "heading": "1.  The question, and the short answer",
+        "level": 1,
+        "body": [
+            ("para",
+             "Standard SAP BDC data products arrive with four connector-generated "
+             "change columns. Custom data products - those built through SLT "
+             "configuration - arrive with whatever their pipeline owner chose to "
+             "expose, commonly a single change timestamp. The question this paper "
+             "answers is what a custom data product should carry in order to support "
+             "incremental capture properly, using the standard configuration as the "
+             "specification."),
+            ("para",
+             "The short answer is not the obvious one. Of the four standard columns, "
+             "one should be adopted, one should be adopted but NOT in the form SAP "
+             "ships it, one is a convenience, and one has no value for capture at "
+             "all. On the two properties that actually determine what capture costs "
+             "and whether it is correct - watermark typing and predicate pruning - "
+             "the reference custom product measured ahead of the reference standard "
+             "product."),
+            ("warn",
+             "And before asking SAP for anything: the highest-value action found in "
+             "this work required nothing from SAP. The reference custom share already "
+             "carried SAP's own deletion and blocking codes, populated on 19.0% of "
+             "purchase order items and accounting for 42.2% of reported USD ordered "
+             "value, and the Gold layer discarded them. Section 5."),
+        ],
+    },
+    {
+        "heading": "2.  Why the standard configuration is the right yardstick",
+        "level": 1,
+        "body": [
+            ("para",
+             "A catalog-linked database holds Iceberg tables on an SAP-managed "
+             "external catalog. Snowflake's three native change mechanisms are all "
+             "refused on them, which is what makes the share's own columns the whole "
+             "of the available design space:"),
+            ("table", {
+                "headers": ["Attempted operation", "Error returned"],
+                "rows": [
+                    ["CREATE STREAM ... ON TABLE <share>",
+                     "Streams on External Tables or Iceberg tables with an external "
+                     "catalog must have INSERT_ONLY set to true"],
+                    ["SELECT ... CHANGES(INFORMATION => DEFAULT)",
+                     "CHANGES clause is not supported on external tables or Iceberg "
+                     "tables with an external catalog"],
+                    ["ALTER TABLE ... SET CHANGE_TRACKING = TRUE",
+                     "change_tracking cannot be set for Iceberg tables unless they "
+                     "use Snowflake catalog"],
+                ],
+                "col_widths": [0.42, 0.58],
+            }),
+            ("note",
+             "SHOW TABLES reports change_tracking = ON on these objects regardless. "
+             "That flag is uninformative here and must not be read as evidence that a "
+             "stream-based design is available."),
+            ("para",
+             "Because nothing can be added from the Snowflake side, whatever the "
+             "share carries is the change signal. The four standard columns are "
+             "therefore worth reading as SAP's own answer to the question 'what does "
+             "a consumer need in order to process this incrementally' - not as a "
+             "guess, but as a shipped contract. That makes them the natural "
+             "specification to hold a custom product against."),
+        ],
+    },
+    {
+        "heading": "3.  What each standard column is actually worth",
+        "level": 1,
+        "body": [
+            ("para",
+             "Measured on a live standard data product across five non-empty objects "
+             "(67,480 rows). The verdict column is the point: the four columns are "
+             "not of equal value, and one of them has no value for capture at all."),
+            ("table", {
+                "headers": ["Column", "What was measured", "Verdict"],
+                "rows": [
+                    ["__TIMESTAMP",
+                     "Row write time. TEXT, ISO-8601 with a COMMA decimal separator "
+                     "(2026-06-15T09:41:59,6426580Z). MAX() on the raw text scanned "
+                     "0.000 MB in 2 ms from Iceberg manifest statistics; MAX() over a "
+                     "parsed expression scanned 0.310 MB in 45 ms. Lexicographic "
+                     "order equals chronological order, verified.",
+                     "Essential. The TEXT typing is a liability, not a feature."],
+                    ["__OPERATION_TYPE",
+                     "Change mode. Only L (initial load, 67,087 rows) and A (delta "
+                     "after-image, 393 rows) ever appeared. No delete code was "
+                     "observed anywhere, and the authoritative value list could not "
+                     "be confirmed from SAP documentation.",
+                     "Necessary in principle. Unproven in practice."],
+                    ["load_type_<hash>",
+                     "Load phase. initial = 67,087, delta = 393. Confirms the "
+                     "connector appends rather than reloading, which is the "
+                     "precondition for any watermark to mean anything.",
+                     "Useful, cheap, and replaceable by inference."],
+                    ["run_id_<hash>",
+                     "Held the SAME value on the initial snapshot and on every delta "
+                     "that followed it. Identifies the replication flow, not the "
+                     "batch. The 32-hex suffix is likewise per product, not per "
+                     "object - identical across all seven objects.",
+                     "No value for capture. Do not replicate it."],
+                ],
+                "col_widths": [0.17, 0.53, 0.30],
+            }),
+            ("para",
+             "The __TIMESTAMP finding is the one that generalises into a rule. "
+             "Because the format is fixed-width and zero-padded, a text comparison is "
+             "both correct and free, while parsing before comparing turns a free "
+             "poll into a scan on every cycle in order to learn nothing. Any "
+             "implementation on this track should compare as text and parse only for "
+             "display."),
+        ],
+    },
+    {
+        "heading": "4.  Scoring a custom product against the specification",
+        "level": 1,
+        "body": [
+            ("para",
+             "The reference custom-track account carries ZZLASTCHGDATE on 23 of 23 "
+             "L1 objects, with 59 objects carrying it account-wide and no "
+             "connector metadata columns anywhere. Scoring it against the four "
+             "standard capabilities, plus the two properties that govern cost:"),
+            ("table", {
+                "headers": ["Capability", "Standard product", "Custom product",
+                            "Ahead"],
+                "rows": [
+                    ["Row change timestamp",
+                     "__TIMESTAMP, TEXT with comma separator; an unguarded cast "
+                     "returns NULL on every row",
+                     "ZZLASTCHGDATE, TIMESTAMP_NTZ, zero nulls across 4,314,292 / "
+                     "1,073,135 / 108,615,680 rows",
+                     "custom"],
+                    ["Operation code",
+                     "__OPERATION_TYPE present, but only L and A observed and no "
+                     "delete code",
+                     "none generated; SAP business deletion codes present and "
+                     "populated (section 5)",
+                     "neither"],
+                    ["Load phase",
+                     "load_type declared",
+                     "inferable - 4,314,285 rows on the load day, then 6, then 1",
+                     "standard"],
+                    ["Flow identity",
+                     "run_id, measured not to be a batch discriminator",
+                     "none",
+                     "neither"],
+                    ["Predicate pruning",
+                     "NOT demonstrated - the reference objects are a single "
+                     "micropartition (39,462 rows, 320 KB) and the predicate read "
+                     "essentially everything",
+                     "0.00 MB against 7,035.80 MB for a full read - 0.0000% - on a "
+                     "108,615,680-row object",
+                     "custom"],
+                    ["Free no-change poll",
+                     "0.000 MB in 2 ms, but only if compared as text",
+                     "0.00 MB in 47-79 ms",
+                     "tie"],
+                ],
+                "col_widths": [0.16, 0.30, 0.32, 0.11],
+            }),
+            ("para",
+             "The engine is identical on both tracks and proven on both. On the "
+             "custom track an initial refresh inserted 4,314,292 rows in 18.3 s and "
+             "the next no-change refresh returned NO_DATA in 984 ms, with 10 of 10 "
+             "Gold-layer dynamic tables INCREMENTAL once REFRESH_MODE was pinned "
+             "explicitly. On the standard track a dynamic table over the live share "
+             "refreshed INCREMENTAL in 5,241 ms and then returned NO_DATA in 610 ms, "
+             "with a watermark poll returning REFRESHED and then NO CHANGE."),
+            ("note",
+             "REFRESH_MODE must be stated explicitly on both tracks. Left to AUTO, "
+             "Snowflake selects FULL on a non-trivial query, and FULL cascades - "
+             "change tracking is unsupported on a FULL dynamic table, so everything "
+             "downstream is forced to FULL as well."),
+        ],
+    },
+    {
+        "heading": "5.  The finding that reorders the priorities",
+        "level": 1,
+        "body": [
+            ("para",
+             "The custom track has no connector-generated operation column, and the "
+             "usual conclusion drawn from that is that deletes are simply invisible. "
+             "That conclusion is too broad. SAP's own business deletion and blocking "
+             "codes were present on the reference custom share, populated, and "
+             "material - and the Gold layer dropped them."),
+            ("table", {
+                "headers": ["Deletion code on purchase order items", "Items",
+                            "Share"],
+                "rows": [
+                    ["(blank) - active", "3,494,547", "81.0%"],
+                    ["L", "812,913", "18.8%"],
+                    ["S", "6,831", "0.2%"],
+                    ["X", "1", "0.0%"],
+                    ["Flagged in total", "819,745", "19.0%"],
+                ],
+                "col_widths": [0.56, 0.24, 0.20],
+            }),
+            ("para",
+             "Restricted to a single currency, so that the figures are additive: of "
+             "69.50 bn USD of ordered value on those items, 40.17 bn sits on active "
+             "items and 29.33 bn - 42.2% - sits on items carrying a deletion or "
+             "blocking code. The same 69.50 bn is the headline ordered-value figure "
+             "the Gold layer reports."),
+            ("warn",
+             "The deletion codes exist in the Silver layer and do not reach Gold. The "
+             "Gold purchase order table carries all 4,314,292 rows, the same count as "
+             "its source, with no deletion column and no filter. Deleted and blocked "
+             "items are therefore included in reported value, unlabelled and "
+             "unfilterable by the consumer."),
+            ("para",
+             "The same pattern appears elsewhere on the share: a deletion code on "
+             "purchase order headers (1,594 flagged), ISMARKEDFORDELETION on products "
+             "(1,086 flagged), and DELETIONINDICATOR, ACCOUNTISMARKEDFORDELETION and "
+             "SUPPLIERCENTRALDELETIONISBLOCK across master data."),
+            ("para",
+             "Two qualifications matter. These are BUSINESS deletion flags - a record "
+             "marked deleted in the source - not replication operation codes; a row "
+             "physically removed from the share still leaves no trace on this track. "
+             "And whether L and S items should be excluded from spend, shown "
+             "separately, or retained is a business decision rather than a technical "
+             "one. What is not defensible is carrying them silently and unlabelled, "
+             "which is the current behaviour."),
+        ],
+    },
+    {
+        "heading": "6.  The recommendation",
+        "level": 1,
+        "body": [
+            ("para",
+             "In priority order, highest value first. Only item 3 requires anything "
+             "from SAP."),
+            ("h2", "6.1  Surface the change metadata the share already carries"),
+            ("para",
+             "Propagate the deletion and blocking codes from Silver to Gold and into "
+             "the semantic layer, so a consumer can filter or label them. This costs "
+             "nothing, requires no SAP change, and on the reference account it "
+             "governs 19.0% of purchase order items and 42.2% of reported USD "
+             "ordered value. It also delivers most of what an operation column would "
+             "deliver, because logical deletion is the dominant deletion mode in SAP."),
+            ("h2", "6.2  Keep the watermark strongly typed - do not copy the standard form"),
+            ("para",
+             "Specify the change timestamp as TIMESTAMP_NTZ and NOT NULL. The "
+             "reference custom product already achieves zero nulls across 114 million "
+             "rows; make that a contract rather than a happy accident. Explicitly do "
+             "NOT adopt __TIMESTAMP's TEXT-with-comma representation - it casts "
+             "silently to NULL and would be a regression."),
+            ("h2", "6.3  Ask for a replication operation code, or a soft-delete guarantee"),
+            ("para",
+             "This is the one genuine capability gap, and the only item here that is "
+             "an ask to the pipeline owner. Either emit an operation code that "
+             "distinguishes insert, update and physical delete, or guarantee that "
+             "rows are soft-deleted rather than removed. A row that simply stops "
+             "being carried is unrecoverable by any watermark design. Note that the "
+             "standard track has not been shown to satisfy this either, so it is an "
+             "ask for both tracks rather than a reason to prefer one."),
+            ("h2", "6.4  Add a declared load-phase flag"),
+            ("para",
+             "A column distinguishing the initial snapshot from subsequent deltas "
+             "removes the need to infer the load phase from the timestamp "
+             "distribution. Inference works today - 4,314,285 rows on the load day, "
+             "then 6, then 1 - so this is a convenience rather than a requirement."),
+            ("h2", "6.5  Do not replicate run_id"),
+            ("para",
+             "It was measured to hold the same value on the initial snapshot and on "
+             "every delta, so it identifies the flow rather than the batch and adds "
+             "no capture capability. Copying it into a custom product would add a "
+             "column and no information."),
+        ],
+    },
+    {
+        "heading": "7.  What this means for choosing between product types",
+        "level": 1,
+        "body": [
+            ("para",
+             "Where a standard data product exists, prefer it - for one structural "
+             "reason. It carries an operation column at all, which means a delete can "
+             "in principle be represented, and no source-system configuration is "
+             "required to obtain it. That is a real advantage and it is the right "
+             "default."),
+            ("para",
+             "But a standard product is not a shortcut to a correct design. It ships "
+             "a worse timestamp representation, an operation enumeration that could "
+             "not be confirmed and in which no delete code was ever observed, a flow "
+             "identifier of no use to capture, and metadata that is destroyed by the "
+             "ordinary act of copying the share. Its predicate pruning was not "
+             "demonstrated. A well-configured custom product with its deletion codes "
+             "surfaced is materially closer to a correct and economical CDC design "
+             "than an unvalidated standard product is."),
+            ("para",
+             "The practical conclusion is that product type is a weaker determinant "
+             "of CDC quality than configuration and validation are. Both tracks run "
+             "the same engine, and on both the deciding questions are whether the "
+             "watermark is trustworthy, whether the connector merges rather than "
+             "reloads, and whether deletion is represented at all."),
+        ],
+    },
+    {
+        "heading": "8.  What is not established",
+        "level": 1,
+        "body": [
+            ("para",
+             "Four things are open, and each is stated as open rather than smoothed "
+             "over:"),
+            ("para",
+             "First, the authoritative __OPERATION_TYPE enumeration, and whether a "
+             "delete code is ever emitted. Only L and A were observed. The SAP "
+             "documentation page is JavaScript-rendered and could not be read; a web "
+             "search surfaces the SAP Datasphere BigQuery adapter, which is a "
+             "different target and is deliberately not cited here as authority. Until "
+             "this is answered, treat physical deletes as unrepresented on both "
+             "tracks and reconcile row counts on a schedule."),
+            ("para",
+             "Second, whether a watermark predicate prunes on the standard track at "
+             "production scale. It did not prune on the reference objects, but those "
+             "are a single micropartition, so the test had no headroom."),
+            ("para",
+             "Third, what a dynamic table refresh does when the source has genuinely "
+             "changed after the initial load. Refreshes were observed as INCREMENTAL "
+             "on first build and NO_DATA when nothing had changed; a refresh driven by "
+             "a new connector write was not observed on either account."),
+            ("para",
+             "Fourth, whether the SAP deletion codes L, S and X should exclude items "
+             "from spend reporting. That is a business determination, not a "
+             "measurement, and this paper deliberately stops at establishing that the "
+             "codes are populated, material, and currently discarded."),
+        ],
+    },
+    {
+        "heading": "9.  Verifying this on your own tenant",
+        "level": 1,
+        "body": [
+            ("para",
+             "None of the above should be taken on trust. The accompanying probe "
+             "classifies every object by track, validates the standard metadata "
+             "columns, measures poll and extraction cost separately, and returns a "
+             "verdict:"),
+            ("code",
+             "cd probes\n"
+             "python3 cdc_readiness.py --connection <your_account> --report readiness.md"),
+            ("para",
+             "The validation step matters most, because the metadata columns cannot "
+             "be trusted on sight. On the reference tenant they were clean inside the "
+             "live catalog-linked database and corrupted on every local copy of it - "
+             "on one product __OPERATION_TYPE held media titles, and on another "
+             "__OPERATION_TYPE, __TIMESTAMP and LOAD_TYPE all held the same customer "
+             "identifier on 735,305 of 735,305 rows with RUN_ID null. The thresholds "
+             "the probe applies come from that measured contrast: an operation column "
+             "with cardinality above 12 or values longer than two characters is not a "
+             "change code, a timestamp column where nothing parses is unusable, and "
+             "operation equal to timestamp on any row indicates a damaged copy."),
+            ("para",
+             "The deployable SQL is in sql/, with sql/05_standard_product_track.sql "
+             "covering validation, the free poll, freshness and a merge template for "
+             "the standard track, and sql/04 covering the custom-track exception "
+             "path. Point capture at the catalog-linked database itself and never at "
+             "a copy of it."),
+        ],
+    },
+]
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Content - Executive Summary
@@ -1311,7 +1680,40 @@ def _make_canvas_factory(doc_title: str, skip_first: bool = True):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def gen_white_paper(out_path: Path) -> int:
-    """Generate the white paper PDF. Returns page count."""
+    """Generate the dual-track technical reference. Returns page count."""
+    return _gen_paper(
+        out_path, WP_TITLE, WP_SUBTITLE, WP_SECTIONS,
+        "This paper documents a dual-track pattern for incremental capture from "
+        "SAP Business Data Cloud catalog-linked shares in Snowflake. The standard "
+        "CDC mechanisms are refused; two alternative signals exist. Both tracks "
+        "share one engine: dynamic tables with REFRESH_MODE = INCREMENTAL. "
+        "A headline risk - silent metadata corruption in local copies - applies "
+        "to both. All claims carry their measured evidence.",
+    )
+
+
+def gen_recommendation(out_path: Path) -> int:
+    """Generate the CDC enablement recommendation paper. Returns page count."""
+    return _gen_paper(
+        out_path, REC_TITLE, REC_SUBTITLE, REC_SECTIONS,
+        "Standard SAP BDC data products ship four connector-generated change "
+        "columns. Custom data products expose only what their pipeline owner "
+        "chose to. This paper treats the standard configuration as a "
+        "specification, scores a well-configured custom product against it, and "
+        "arrives at a recommendation that is not the obvious one: on the two "
+        "properties that govern cost and correctness the custom track measured "
+        "ahead, and the highest-value action requires nothing from SAP at all.",
+    )
+
+
+def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
+               abstract: str) -> int:
+    """Render a cover page plus body sections to a deterministic PDF.
+
+    Shared by both papers. The two differ only in title, abstract and content, so
+    duplicating the page-template and cover machinery would mean two places to fix
+    every layout bug.
+    """
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.platypus import (
@@ -1344,7 +1746,7 @@ def gen_white_paper(out_path: Path) -> int:
     cover_tmpl = PageTemplate(id="Cover", frames=[cover_frame], onPage=draw_cover)
     body_tmpl  = PageTemplate(id="Body",  frames=[body_frame],  onPage=draw_body)
 
-    FC = _make_canvas_factory(WP_TITLE, skip_first=True)
+    FC = _make_canvas_factory(title, skip_first=True)
 
     doc = BaseDocTemplate(
         str(out_path),
@@ -1354,8 +1756,8 @@ def gen_white_paper(out_path: Path) -> int:
     )
     # fix metadata for determinism
     doc.author   = "sap-bdc-cdc accelerator"
-    doc.title    = WP_TITLE
-    doc.subject  = WP_SUBTITLE
+    doc.title    = title
+    doc.subject  = subtitle
     doc.creator  = "generate_collateral.py"
 
     usable_w = W - L - R
@@ -1364,21 +1766,24 @@ def gen_white_paper(out_path: Path) -> int:
     # ── cover ─────────────────────────────────────────────────────────────
     story.append(Spacer(1, 40 * mm))  # push below header strip
 
-    cover_title_style = __import__("reportlab.lib.styles", fromlist=["ParagraphStyle"]).ParagraphStyle(
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+
+    cover_title_style = ParagraphStyle(
         "ctitle", fontName="Helvetica-Bold", fontSize=22,
         textColor=_hex(WHITE), leading=30, spaceAfter=6,
     )
-    cover_sub_style = __import__("reportlab.lib.styles", fromlist=["ParagraphStyle"]).ParagraphStyle(
+    cover_sub_style = ParagraphStyle(
         "csub", fontName="Helvetica", fontSize=13,
         textColor=_hex(LIGHT), leading=18, spaceAfter=4,
     )
-    cover_meta_style = __import__("reportlab.lib.styles", fromlist=["ParagraphStyle"]).ParagraphStyle(
+    cover_meta_style = ParagraphStyle(
         "cmeta", fontName="Helvetica", fontSize=9,
         textColor=_hex(MID), leading=13,
     )
 
-    story.append(Paragraph(WP_TITLE, cover_title_style))
-    story.append(Paragraph(WP_SUBTITLE, cover_sub_style))
+    story.append(Paragraph(title, cover_title_style))
+    story.append(Paragraph(subtitle, cover_sub_style))
     story.append(Spacer(1, 6 * mm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=_hex(RULE)))
     story.append(Spacer(1, 4 * mm))
@@ -1390,28 +1795,18 @@ def gen_white_paper(out_path: Path) -> int:
     ))
     story.append(Spacer(1, 8 * mm))
 
-    # brief abstract on cover
-    abstract_style = __import__("reportlab.lib.styles", fromlist=["ParagraphStyle"]).ParagraphStyle(
+    abstract_style = ParagraphStyle(
         "abstract", fontName="Helvetica", fontSize=10,
-        textColor=_hex(SLATE), leading=15, spaceAfter=6,
-        alignment=__import__("reportlab.lib.enums", fromlist=["TA_LEFT"]).TA_LEFT,
+        textColor=_hex(SLATE), leading=15, spaceAfter=6, alignment=TA_LEFT,
     )
-    story.append(Paragraph(
-        "This paper documents a dual-track pattern for incremental capture from "
-        "SAP Business Data Cloud catalog-linked shares in Snowflake. The standard "
-        "CDC mechanisms are refused; two alternative signals exist. Both tracks "
-        "share one engine: dynamic tables with REFRESH_MODE = INCREMENTAL. "
-        "A headline risk - silent metadata corruption in local copies - applies "
-        "to both. All claims carry their measured evidence.",
-        abstract_style,
-    ))
+    story.append(Paragraph(abstract, abstract_style))
 
     # ── body pages ────────────────────────────────────────────────────────
     from reportlab.platypus import NextPageTemplate
     story.append(NextPageTemplate("Body"))
     story.append(PageBreak())
 
-    for section in WP_SECTIONS:
+    for section in sections:
         story.extend(_section_to_flowables(section, usable_w, styles))
 
     # build with numbered canvas
@@ -1979,7 +2374,7 @@ def main(argv=None):
     if not args:
         args = ["all"]
     if "all" in args:
-        args = ["white-paper", "exec-summary", "deck"]
+        args = ["white-paper", "exec-summary", "deck", "recommendation"]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -2001,6 +2396,9 @@ def main(argv=None):
         elif target == "deck":
             n = gen_deck(out)
             label = f"{n} slides"
+        elif target == "recommendation":
+            n = gen_recommendation(out)
+            label = f"{n} pages"
 
         size_kb = out.stat().st_size // 1024
         print(f"done  ({label}, {size_kb} KB)")
