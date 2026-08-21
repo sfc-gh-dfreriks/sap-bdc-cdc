@@ -21,6 +21,26 @@ find out which you have, per object. The probe does that.
 
 ---
 
+## Which track do you have — and where to go
+
+![Standard and custom tracks side by side](assets/diagrams/D10_delineation.png)
+
+| | Standard data products | Custom data products |
+| --- | --- | --- |
+| Who provides the signal | SAP, automatically | your pipeline owner, by choice |
+| Change timestamp | `__TIMESTAMP` (TEXT, comma decimal separator) | e.g. `ZZLASTCHGDATE` (TIMESTAMP_NTZ) |
+| Operation column | `__OPERATION_TYPE` | none |
+| Batch context | `load_type_<hash>`, `run_id_<hash>` | none |
+| Can represent a delete | structurally yes — unverified in practice | no |
+| First step | validate the metadata — it can be silently corrupted on copies | identify which capabilities the share carries |
+| **Your document** | **[docs/standard-products-cdc.md](docs/standard-products-cdc.md)** — a numbered procedure to follow | **[docs/custom-products-cdc.md](docs/custom-products-cdc.md)** — a specification of what to ask for |
+
+Both tracks share the same engine — dynamic tables with `REFRESH_MODE = INCREMENTAL` — and the same constraint that streams, `CHANGES()`, and change tracking are all refused. [docs/how-it-works.md](docs/how-it-works.md) covers the common mechanism. The two documents above cover what is different.
+
+Run the readiness probe first regardless of track. It classifies every object, validates standard metadata, and confirms the mechanisms work on your specific tenant before you deploy anything.
+
+---
+
 ## Is this you?
 
 You have one or more SAP BDC data products linked into a Snowflake account, and:
@@ -113,6 +133,8 @@ tenant rather than asserting an enumeration, and this repository treats deletes 
 standard track as unverified rather than available. See
 [docs/gaps-and-asks.md](docs/gaps-and-asks.md).
 
+The step-by-step procedure for the standard track — including validation, registration, and polling — is in [docs/standard-products-cdc.md](docs/standard-products-cdc.md). The specification of what to ask for on the custom track, including the four capabilities and their measured status, is in [docs/custom-products-cdc.md](docs/custom-products-cdc.md).
+
 ---
 
 ## Do not trust the metadata columns on sight
@@ -142,6 +164,8 @@ silently. Two rules follow, and they are cheap:
   each other, and whether the hash suffix is present. On the reference share it reported all
   registered objects `USABLE` with cardinality 2 and maximum length 1; the thresholds come
   from the measured contrast with the corrupt copies
+
+The validation procedure, its thresholds, and the full corruption examples are in [docs/standard-products-cdc.md](docs/standard-products-cdc.md).
 
 ---
 
@@ -275,8 +299,10 @@ gaps worth raising with Snowflake product management.
 
 | Document | Contents |
 | --- | --- |
-| [docs/how-it-works.md](docs/how-it-works.md) | The mechanism, the evidence, and why the alternatives are refused |
-| [docs/deployment.md](docs/deployment.md) | Step-by-step, with the checks to run at each stage |
+| [docs/standard-products-cdc.md](docs/standard-products-cdc.md) | Standard-track procedure — numbered steps from identification through monitoring |
+| [docs/custom-products-cdc.md](docs/custom-products-cdc.md) | Custom-track specification — the four capabilities and what to ask for |
+| [docs/how-it-works.md](docs/how-it-works.md) | Mechanism common to both tracks — why the platform refuses CDC, why dynamic tables work, the connector merge precondition |
+| [docs/deployment.md](docs/deployment.md) | Step-by-step deployment — two clearly separated sequences, standard and custom, with shared common steps |
 | [docs/gaps-and-asks.md](docs/gaps-and-asks.md) | Limitations, open questions, and product asks |
 | [collateral/SAP_BDC_CDC_White_Paper.pdf](collateral/SAP_BDC_CDC_White_Paper.pdf) | The self-contained version of all three, with diagrams and the step-by-step build |
 | [collateral/SAP_BDC_CDC_Enablement_Recommendation.pdf](collateral/SAP_BDC_CDC_Enablement_Recommendation.pdf) | What to ask for when configuring a data product for capture — the standard four columns scored one by one, and why the highest-value action needs nothing from SAP |

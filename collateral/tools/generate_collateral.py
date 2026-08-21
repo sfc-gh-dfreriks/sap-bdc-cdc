@@ -26,6 +26,7 @@ FILENAMES = {
     "exec-summary": "SAP_BDC_CDC_Executive_Summary.pdf",
     "deck":         "SAP_BDC_CDC_Solution_Overview.pptx",
     "recommendation": "SAP_BDC_CDC_Enablement_Recommendation.pdf",
+    "exec-deck":      "SAP_BDC_CDC_Executive_Overview.pptx",
 }
 
 # ── palette (blue / slate / grey - no Mosaic green) ───────────────────────
@@ -1017,6 +1018,187 @@ REC_SECTIONS = [
              "the standard track, and sql/04 covering the custom-track exception "
              "path. Point capture at the catalog-linked database itself and never at "
              "a copy of it."),
+        ],
+    },
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Content - Executive Overview deck
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# A separate deck from the solution overview on purpose. That one is a technical
+# walkthrough of the mechanism; this one answers an executive's three questions -
+# what are the two options, what does each cost, and what do you want me to
+# approve - and it leans on the diagrams rather than on bullet density.
+
+EXEC_SLIDES = [
+    {
+        "type": "title",
+        "title": "Change Data Capture on\nSAP Business Data Cloud",
+        "subtitle": (
+            "How it is done on standard data products, and what to ask for on custom ones"
+            "\n\n"
+            "Executive overview  |  August 2026  |  All figures measured on live tenants"
+        ),
+    },
+    {
+        "type": "bullets",
+        "title": "The situation",
+        "bullets": [
+            "SAP BDC data products arrive in Snowflake as catalog-linked shares - "
+            "read-only, zero-copy, no storage cost",
+            "Nothing in the share tells the Gold layer what changed, so the default "
+            "behaviour is to re-read all of it on a schedule",
+            "Snowflake's three native change mechanisms are all refused on these "
+            "objects, because they are Iceberg tables on an SAP-managed catalog",
+            "So the change signal has to come from the share itself - and what the "
+            "share carries depends on which kind of data product it is",
+            "That distinction is the subject of this deck. It decides whether CDC is "
+            "a procedure to run or a specification to negotiate",
+        ],
+    },
+    {
+        "type": "figure",
+        "title": "Two kinds of data product, two different jobs",
+        "file": "D10_delineation.png",
+        "caption": "The engine is identical on both. What differs is who supplies the "
+                   "change signal, and whether a delete can be represented at all.",
+    },
+    {
+        "type": "figure",
+        "title": "Standard data products - a procedure",
+        "file": "D8_standard_track.png",
+        "caption": "SAP generates the change columns. Validate them, then poll them "
+                   "for free. No source-system change is required.",
+    },
+    {
+        "type": "figure",
+        "title": "Custom data products - a specification",
+        "file": "D9_custom_track.png",
+        "caption": "Nothing is generated. Two capabilities are already in the share, "
+                   "one is present but discarded, and one must be requested.",
+    },
+    {
+        "type": "table",
+        "title": "What it costs, measured",
+        "headers": ["", "Standard product", "Custom product"],
+        "rows": [
+            ["Detecting no change",
+             "0.000 MB in 2 ms - free",
+             "0.00 MB in 47-79 ms - free"],
+            ["Reading only the change",
+             "not demonstrated at scale",
+             "0.0000% of a full read, on 108,615,680 rows"],
+            ["Refresh when nothing moved",
+             "NO_DATA in 610 ms",
+             "NO_DATA in 984 ms"],
+            ["Refresh with data",
+             "INCREMENTAL in 5,241 ms",
+             "4,314,292 rows in 18.3 s"],
+            ["Code to write",
+             "none - dynamic tables",
+             "none - dynamic tables"],
+        ],
+        "col_widths": [0.26, 0.34, 0.40],
+    },
+    {
+        "type": "risk",
+        "title": "The risk on standard products: never trust a copy",
+        "risk_statement": "The connector metadata was reliable inside the live "
+                          "share and corrupted in every local copy of it we examined.",
+        "bullets": [
+            "On one product the operation column held media titles - 17 distinct "
+            "values, up to 33 characters, plus 16,317 nulls",
+            "On another, three metadata columns all held the same customer "
+            "identifier across 735,305 of 735,305 rows",
+            "The defect propagated downstream into the layers built on those copies",
+            "None of it raises an error. It produces a wrong incremental result "
+            "quietly, which is the expensive kind of wrong",
+        ],
+        "rule": "Point capture at the catalog-linked share itself, and validate the "
+                "columns before building on them. Both are one-line checks.",
+    },
+    {
+        "type": "risk",
+        "title": "The finding that changed our recommendation",
+        "risk_statement": "SAP's own deletion and blocking codes are already in "
+                          "the share - and the Gold layer drops them.",
+        "bullets": [
+            "19.0% of purchase order items carry a deletion or blocking code - "
+            "819,745 of 4,314,292",
+            "In USD, where the amounts are additive: 29.33 bn of 69.50 bn of ordered "
+            "value sits on flagged items - 42.2%",
+            "That 69.50 bn is the same headline ordered-value figure the Gold layer "
+            "reports today, with no label and no way to filter",
+            "Surfacing those codes costs nothing and requires nothing from SAP",
+        ],
+        "rule": "Whether deleted and blocked items belong in spend is a business "
+                "decision. Carrying them silently is not defensible either way.",
+    },
+    {
+        "type": "bullets_detail",
+        "title": "The recommendation",
+        "intro": "In priority order. Only item 3 is a request to SAP.",
+        "bullets": [
+            "1. Surface the deletion and blocking codes already in the share, so "
+            "reported value can be labelled or filtered. Free, and worth 42.2% of the "
+            "headline figure",
+            "2. Keep the change timestamp strongly typed and never null. The custom "
+            "track already does this better than the standard one does",
+            "3. Ask SAP for a replication operation code, or a guarantee that "
+            "deletion is soft. This is the one genuine capability gap - and it is "
+            "open on both tracks",
+            "4. Add a declared load-phase flag. A convenience; inference works today",
+            "5. Do not copy run_id into a custom product - it carries no change "
+            "information",
+        ],
+        "caveat": "Prefer a standard data product where one exists, because only it "
+                  "carries an operation column. But product type matters less than "
+                  "configuration and validation do.",
+    },
+    {
+        "type": "bullets",
+        "title": "What we do not yet know",
+        "bullets": [
+            "Whether the standard operation column ever emits a delete code - only "
+            "'initial load' and 'delta' values were ever observed",
+            "The authoritative list of operation values. SAP's documentation page "
+            "could not be read, and the nearest published equivalent describes a "
+            "different target, so we do not cite it",
+            "Whether a change predicate reads only the change at production scale on "
+            "the standard track - the reference tables were too small to tell",
+            "Until the delete question is answered, row counts must be reconciled on "
+            "a schedule on both tracks",
+            "These are open asks to SAP, not blockers. Capture works today on both "
+            "tracks without them",
+        ],
+    },
+    {
+        "type": "closing",
+        "title": "Next steps, and what we are asking SAP",
+        "next_steps": [
+            "Run the readiness probe against the account - about a minute, read-only, "
+            "classifies every object as standard or custom and validates the metadata",
+            "Surface the deletion and blocking codes from Silver to Gold, so reported "
+            "value can be labelled or filtered. Free, and worth 42.2% of the headline "
+            "USD figure",
+            "Confirm REFRESH_MODE = INCREMENTAL is pinned on every Gold dynamic table, "
+            "so a silent fall back to FULL cannot cascade",
+            "Decide, as a business question, whether logically deleted and blocked "
+            "items belong in spend reporting",
+            "Schedule row-count reconciliation on both tracks until the delete "
+            "question is closed",
+        ],
+        "open_asks": [
+            "An authoritative list of operation-code values, and whether a delete "
+            "code is ever emitted",
+            "Why the standard change timestamp ships as text with a comma decimal "
+            "separator rather than as a timestamp",
+            "Whether change_tracking = ON means anything on these objects, given "
+            "streams and CHANGES() are both refused",
+            "Declared primary keys per object, since the merge grain currently comes "
+            "from source-system knowledge",
         ],
     },
 ]
@@ -2037,8 +2219,12 @@ def _add_bullet_para(tf, text, font_name, font_size, color_hex,
     return para
 
 
-def gen_deck(out_path: Path) -> int:
-    """Generate the solution overview PPTX. Returns slide count."""
+def gen_deck(out_path: Path, slides: list | None = None) -> int:
+    """Render a slide list to a deterministic PPTX. Returns slide count.
+
+    Defaults to the solution overview. Passing a different list reuses the same
+    slide renderers, which is why the executive deck needs no second builder.
+    """
     from pptx import Presentation
     from pptx.util import Inches, Pt, Emu
     from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
@@ -2079,7 +2265,7 @@ def gen_deck(out_path: Path) -> int:
 
     # ── slide builders ────────────────────────────────────────────────────
 
-    for s in SLIDES:
+    for s in (slides if slides is not None else SLIDES):
         stype = s["type"]
 
         if stype == "title":
@@ -2374,7 +2560,8 @@ def main(argv=None):
     if not args:
         args = ["all"]
     if "all" in args:
-        args = ["white-paper", "exec-summary", "deck", "recommendation"]
+        args = ["white-paper", "exec-summary", "deck", "recommendation",
+                "exec-deck"]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -2399,6 +2586,9 @@ def main(argv=None):
         elif target == "recommendation":
             n = gen_recommendation(out)
             label = f"{n} pages"
+        elif target == "exec-deck":
+            n = gen_deck(out, EXEC_SLIDES)
+            label = f"{n} slides"
 
         size_kb = out.stat().st_size // 1024
         print(f"done  ({label}, {size_kb} KB)")
