@@ -19,7 +19,7 @@ from pathlib import Path
 
 OUT_DIR    = Path(__file__).resolve().parent.parent   # collateral/
 ASSETS_DIR = OUT_DIR.parent / "assets" / "diagrams"   # the repo's own diagrams
-BUILD_DATE = "August 2026"
+BUILD_DATE = "November 2026"
 
 FILENAMES = {
     "white-paper":  "SAP_BDC_CDC_White_Paper.pdf",
@@ -564,9 +564,10 @@ WP_SECTIONS = [
                      "when streams and CHANGES() are refused.",
                      "The flag is misleading and causes diagnostic errors on "
                      "first encounter."],
-                    ["(d) Declared primary keys per catalog-linked object.",
-                     "No primary key is declared. Wrong merge grain silently discards "
-                     "real records without any constraint violation."],
+                    ["(d) Declared primary keys on custom data products too.",
+                     "Delivered on standard products: SHOW PRIMARY KEYS returns the "
+                     "grain (RELY, 54 of 55 objects). Custom products may declare "
+                     "none, and RELY is not enforced, so keys are still verified."],
                     ["(e) Guidance on uninitialised objects.",
                      "A share can advertise a table that has never been materialised. "
                      "Tooling must handle this per-object failure gracefully."],
@@ -1201,8 +1202,8 @@ EXEC_SLIDES = [
             "separator rather than as a timestamp",
             "Whether change_tracking = ON means anything on these objects, given "
             "streams and CHANGES() are both refused",
-            "Declared primary keys per object, since the merge grain currently comes "
-            "from source-system knowledge",
+            "Declared primary keys on custom products too - standard products "
+            "now declare theirs, read then verified",
         ],
     },
 ]
@@ -1555,7 +1556,7 @@ SLIDES = [
             "(a) Authoritative __OPERATION_TYPE contract - does a delete code exist?",
             "(b) Why __TIMESTAMP is TEXT with comma decimal separator, not a timestamp type",
             "(c) Whether change_tracking=ON is meaningful when streams are refused",
-            "(d) Declared primary keys per catalog-linked object",
+            "(d) Declared primary keys on custom products (standard: delivered)",
             "(e) Guidance on uninitialised objects in a share",
         ],
     },

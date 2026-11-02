@@ -21,6 +21,14 @@ find out which you have, per object. The probe does that. (Which track you are o
 the *source signal* can express; it does not decide whether you can detect deletes at all —
 the dynamic table plus stream does that on either track.)
 
+**Standard products now declare their grain.** Since 2026-10-30 `SHOW PRIMARY KEYS` on a
+catalog-linked database returns each standard object's key, with `rely = true` — 54 of 55
+objects on the reference account, every declared key verified unique. The merge key is read
+from the share rather than reverse-engineered, and with a trusted key the `DELETE` + `INSERT`
+pair a stream on a dynamic table emits for an update can be classified as an update. RELY is
+SAP's assertion, not a Snowflake constraint, so the probe still tests every key. Custom
+products may declare none.
+
 ![Where capture sits](assets/diagrams/D3_architecture.png)
 
 ---
@@ -35,13 +43,14 @@ the dynamic table plus stream does that on either track.)
 | Change timestamp | `__TIMESTAMP` (TEXT, comma decimal separator) | e.g. `ZZLASTCHGDATE` (TIMESTAMP_NTZ) |
 | Operation column | `__OPERATION_TYPE` | none |
 | Batch context | `load_type_<hash>`, `run_id_<hash>` | none |
+| Primary key (grain) | declared on the share (`SHOW PRIMARY KEYS`, `rely = true`) — read it, then verify | may be absent — enter by hand and verify; ask for it |
 | Can represent a delete | structurally yes — unverified in practice | no — but see note below |
 | First step | validate the metadata — it can be silently corrupted on copies | identify which capabilities the share carries |
 | **Your document** | **[docs/standard-products-cdc.md](docs/standard-products-cdc.md)** — a numbered procedure to follow | **[docs/custom-products-cdc.md](docs/custom-products-cdc.md)** — a specification of what to ask for |
 
 Both tracks share the same engine — dynamic tables with `REFRESH_MODE = INCREMENTAL` — and the same constraint that streams, `CHANGES()`, and change tracking are all refused *on the share objects themselves*. [docs/how-it-works.md](docs/how-it-works.md) covers the common mechanism. The two documents above cover what is different.
 
-**Note on deletes.** The table above describes what the *source signal* can express. It is not a statement about what you can detect. A dynamic table over the share detects physical deletes on either track by diffing snapshots, and a standard stream on that dynamic table exposes them as `DELETE` records — so the custom track's missing operation column is not a barrier to delete handling. The one thing no track gives you is a reliable update *flag*: `METADATA$ISUPDATE` is always `FALSE`, and an update arrives as a `DELETE` + `INSERT` pair. Field-validated with a customer; details and the MERGE pattern are in [how-it-works.md](docs/how-it-works.md#the-interposition-that-does-work-a-stream-on-a-dynamic-table).
+**Note on deletes.** The table above describes what the *source signal* can express. It is not a statement about what you can detect. A dynamic table over the share detects physical deletes on either track by diffing snapshots, and a standard stream on that dynamic table exposes them as `DELETE` records — so the custom track's missing operation column is not a barrier to delete handling. The one thing no track gives you is a reliable update *flag*: `METADATA$ISUPDATE` is always `FALSE`, and an update arrives as a `DELETE` + `INSERT` pair. Where the object declares a key, join the pair on it: a changed business-column hash is an update, an identical one is a re-delivery. Field-validated with a customer; details and the MERGE pattern are in [how-it-works.md](docs/how-it-works.md#the-interposition-that-does-work-a-stream-on-a-dynamic-table).
 
 Run the readiness probe first regardless of track. It classifies every object, validates standard metadata, and confirms the mechanisms work on your specific tenant before you deploy anything.
 

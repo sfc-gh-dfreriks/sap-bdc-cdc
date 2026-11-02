@@ -28,8 +28,12 @@
 
 /* ---------------------------------------------------------------------------
    Register the object. MERGE_KEY_COLUMNS must come from a verified grain, not a
-   guess: a catalog-linked table declares no primary key, and getting the grain
-   wrong here duplicates rows or discards real records without any error.
+   guess: getting it wrong duplicates rows or discards real records without any
+   error. Standard data products declare their key on the share - leave it NULL
+   and run SP_LOAD_DECLARED_KEYS (sql/01) to fill it. This example is a CUSTOM
+   object, which typically declares none, so the grain is entered by hand with
+   KEY_SOURCE = 'MANUAL' and the loader will never overwrite it. Verify it either
+   way with SP_VERIFY_MERGE_KEYS before the first MERGE.
 
    TRACK = 'CUSTOM' because this object carries a source-system extension
    timestamp rather than the connector's own metadata columns. On a standard data
@@ -39,12 +43,14 @@
    left unset by accident.
    --------------------------------------------------------------------------- */
 INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
-  (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, MERGE_KEY_COLUMNS, LAST_WATERMARK)
+  (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, MERGE_KEY_COLUMNS, KEY_SOURCE,
+   LAST_WATERMARK)
 SELECT 'SO_ITEM',
        '<L1_DB>.<L1_SCHEMA>.SALES_ORDER_ITEM',
        'CUSTOM',
        'ZZLASTCHGDATE',
        'SALESDOCUMENT,SALESDOCUMENTITEM',
+       'MANUAL',
        NULL
 WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
                    WHERE OBJECT_NAME = 'SO_ITEM');

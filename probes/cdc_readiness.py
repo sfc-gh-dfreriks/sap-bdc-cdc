@@ -29,6 +29,7 @@ both, so every object is classified individually:
 The questions it answers, in the order they matter:
 
   1  Is there a change signal at all?          and which track does each object use
+  1b Does the share declare each object's key? and does the declared key hold
   2  Can the standard metadata be trusted?     measured, because copies corrupt it
   3  Does the connector merge, or reload?      if it reloads, no watermark can work
   4  Is polling the watermark free?            it is, but only if you do not parse it
@@ -48,6 +49,9 @@ from discover import (Obj, StandardSignal, catalog_linked_databases, find_standa
                       find_watermark, inventory, track_of)
 
 SCRATCH = "CDC_READINESS_SCRATCH"
+# A declared key is tested with one COUNT(DISTINCT) per object. Above this many rows
+# the check is skipped and noted, so the probe stays cheap on large transaction tables.
+KEY_CHECK_MAX_ROWS = 20_000_000
 
 
 class Assessment:
@@ -55,6 +59,7 @@ class Assessment:
         self.s = s
         self.v = verbose
         self.findings: list[dict] = []
+        self.excluded: list[Obj] = []
         self.started = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # ------------------------------------------------------------------ plumbing
@@ -100,8 +105,92 @@ class Assessment:
                         + ("" if len(broken) <= 4 else f", and {len(broken) - 4} more"),
                         evidence={"objects": [{"object": f"{o.database}.{o.schema}.{o.name}",
                                                "error": o.error} for o in broken]})
+            self.excluded = broken
             objs = [o for o in objs if not o.error]
         return objs
+
+    # ------------------------------------------------------------ 1b declared keys
+    def declared_keys(self, objs: list[Obj],
+                      max_rows: int = KEY_CHECK_MAX_ROWS) -> dict[str, list[str]]:
+        """Read the primary keys SAP publishes on the share and test that they hold.
+
+        Since 2026-10-30 standard data products declare their grain: SHOW PRIMARY KEYS
+        on a catalog-linked database returns one row per key part with rely = true.
+        RELY means SAP asserts the key; Snowflake does not enforce it, so each declared
+        key is tested here with COUNT(*) against COUNT(DISTINCT key parts). Rows with a
+        NULL key part are counted separately, because COUNT(DISTINCT a, b) skips them
+        and would hide a NULL-keyed duplicate. Objects without a declared key are
+        expected on custom data products and fall back to a hand-entered key.
+        """
+        keys: dict[str, list[str]] = {}
+        per_db: list[dict] = []
+        # Objects excluded at discovery still count towards coverage: a share that
+        # advertises a table without a key is the finding, whether or not it has rows.
+        everything = objs + self.excluded
+        for db in sorted({o.database for o in everything}):
+            try:
+                rows = self.s.rows(f"SHOW PRIMARY KEYS IN DATABASE {q(db)}")
+            except Exception as e:
+                per_db.append({"database": db, "error": " ".join(str(e).split())})
+                continue
+            parts: dict[str, list[tuple[int, str]]] = {}
+            for r in rows:
+                k = f"{r['database_name']}.{r['schema_name']}.{r['table_name']}"
+                parts.setdefault(k, []).append((int(r["key_sequence"]), r["column_name"]))
+            for k, p in parts.items():
+                keys[k] = [c for _, c in sorted(p)]
+            in_db = [o for o in everything if o.database == db]
+            missing = [o.name for o in in_db if f"{o.database}.{o.schema}.{o.name}" not in keys]
+            per_db.append({"database": db, "objects": len(in_db),
+                           "declared": len(in_db) - len(missing), "missing": missing})
+
+        tested, dupes, skipped = [], [], []
+        for o in objs:
+            k = keys.get(f"{o.database}.{o.schema}.{o.name}")
+            if not k:
+                continue
+            if not o.rows:
+                skipped.append({"object": o.fqn, "reason": "empty"})
+                continue
+            if o.rows > max_rows:
+                skipped.append({"object": o.fqn, "reason": f"{o.rows:,} rows > {max_rows:,}"})
+                continue
+            cols = ", ".join(q(c) for c in k)
+            nulls = " OR ".join(f"{q(c)} IS NULL" for c in k)
+            r = self.s.one(f"SELECT COUNT(*) AS N, COUNT(DISTINCT {cols}) AS D, "
+                           f"COUNT_IF({nulls}) AS NK FROM {o.fqn}")
+            n, d, nk = int(r["N"]), int(r["D"]), int(r["NK"])
+            ev = {"object": o.fqn, "key": k, "rows": n, "distinct": d, "null_key_rows": nk}
+            tested.append(ev)
+            if d + nk < n or nk:
+                dupes.append(ev)
+
+        total = sum(x.get("objects", 0) for x in per_db)
+        declared = sum(x.get("declared", 0) for x in per_db)
+        missing = [f"{x['database']}.{m}" for x in per_db for m in x.get("missing", [])]
+        summary = "; ".join(f"{x['database']} {x['declared']}/{x['objects']}" if "objects" in x
+                            else f"{x['database']} unreadable" for x in per_db)
+        ev = {"databases": per_db, "keys": keys, "tested": tested, "skipped": skipped}
+        if dupes:
+            self.record("keys.declared", "FAIL",
+                        f"{len(dupes)} declared key(s) do not hold - RELY is asserted by SAP, "
+                        "not enforced, so do not merge on these: "
+                        + ", ".join(f"{x['object']} ({x['rows']:,} rows, {x['distinct']:,} "
+                                    f"distinct, {x['null_key_rows']:,} null-keyed)"
+                                    for x in dupes[:4]), evidence=ev)
+        elif missing:
+            self.record("keys.declared", "WARN",
+                        f"{declared}/{total} objects declare a primary key ({summary}). "
+                        f"{len(tested)} tested unique, {len(skipped)} skipped. Without a "
+                        "declared key (expected on custom data products), enter the grain "
+                        "by hand and verify it: " + ", ".join(missing[:6])
+                        + ("" if len(missing) <= 6 else f", and {len(missing) - 6} more"),
+                        evidence=ev)
+        else:
+            self.record("keys.declared", "PASS",
+                        f"{declared}/{total} objects declare a primary key ({summary}); "
+                        f"{len(tested)} tested unique, {len(skipped)} skipped.", evidence=ev)
+        return keys
 
     # -------------------------------------------------------- 2 the change signal
     def change_signal(self, objs: list[Obj],
@@ -711,6 +800,7 @@ FROM TABLE({fqn(SCRATCH)}.INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY(
         poll = self.status_of("cost.poll")
         extract = self.status_of("cost.extract")
         load = self.status_of("semantics.load_type")
+        keys = self.status_of("keys.declared")
 
         # A usable signal can come from either track. Corrupt standard metadata does not
         # count as one, however plausible the column names look.
@@ -784,6 +874,14 @@ FROM TABLE({fqn(SCRATCH)}.INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY(
             why.append("Some standard objects have unusable metadata, so route those through "
                        "the custom watermark track instead and treat the operation column as "
                        "absent.")
+        if keys == "FAIL":
+            why.append("At least one primary key the share declares does not hold on the "
+                       "data. RELY is SAP's assertion, not a Snowflake constraint: enter and "
+                       "verify those objects' grain by hand before merging on it.")
+        elif keys in ("PASS", "WARN"):
+            why.append("The share declares primary keys, and every one tested holds. Source "
+                       "merge keys from SHOW PRIMARY KEYS (sql/01_capture_control.sql) rather "
+                       "than by hand; objects without one still need a hand-entered grain.")
         if load == "PASS":
             why.append("A snapshot and at least one delta have both landed, so the connector "
                        "appends changes rather than reloading - the precondition for any "
@@ -870,6 +968,7 @@ def main() -> int:
         return 2
 
     asm.count_rows(objs)
+    asm.declared_keys(objs)
     sigs = asm.standard_signal(objs)
     wms = asm.change_signal(objs, sigs)
     if sigs:
@@ -928,6 +1027,27 @@ def _markdown(p: dict) -> str:
             "| Check | Status | Detail |", "| --- | --- | --- |"]
     for f in p["findings"]:
         out.append(f"| `{f['check']}` | {f['status']} | {f['detail']} |")
+
+    kev = next((f.get("evidence") or {} for f in p["findings"]
+                if f["check"] == "keys.declared"), {})
+    if kev.get("databases"):
+        out += ["", "## Declared primary keys", "",
+                "Read from `SHOW PRIMARY KEYS IN DATABASE`. `rely = true` is SAP's assertion; "
+                "Snowflake does not enforce it, so each key was tested with `COUNT(*)` against "
+                "`COUNT(DISTINCT <key parts>)`.", "",
+                "| Database | Objects | Declared | Without a key |", "| --- | --- | --- | --- |"]
+        for x in kev["databases"]:
+            if "objects" not in x:
+                out.append(f"| {x['database']} | - | unreadable | {x.get('error', '')} |")
+                continue
+            out.append(f"| {x['database']} | {x['objects']} | {x['declared']} | "
+                       f"{', '.join(x['missing']) or '-'} |")
+        out += ["", "| Object | Key | Rows | Distinct | Null-keyed |", "| --- | --- | --- | --- | --- |"]
+        for t in kev.get("tested", []):
+            out.append(f"| `{t['object']}` | {', '.join(t['key'])} | {t['rows']:,} | "
+                       f"{t['distinct']:,} | {t['null_key_rows']:,} |")
+        for t in kev.get("skipped", []):
+            out.append(f"| `{t['object']}` | skipped: {t['reason']} | | | |")
 
     tracks = next((f.get("evidence") or {} for f in p["findings"]
                    if f["check"] == "signal.standard"), {})

@@ -139,19 +139,21 @@ Do not put non-deterministic expressions inside the defining query. Put time-rel
 ```sql
 INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
   (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, OPERATION_COLUMN,
-   MERGE_KEY_COLUMNS, LAST_WATERMARK_TEXT)
+   LAST_WATERMARK_TEXT)
 SELECT '<NAME>',
        '"<LINKED_DB>"."<LINKED_SCHEMA>"."<OBJECT_NAME>"',
        'STANDARD',
        '__TIMESTAMP',
        '__OPERATION_TYPE',
-       '<KEY_COLUMN_1>,<KEY_COLUMN_2>',
        NULL
 WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
                     WHERE OBJECT_NAME = '<NAME>');
+
+CALL <L2_DB>.CAPTURE_CONTROL.SP_LOAD_DECLARED_KEYS('<LINKED_DB>');
+CALL <L2_DB>.CAPTURE_CONTROL.SP_VERIFY_MERGE_KEYS();   -- expect: all unique
 ```
 
-`TRACK` must be `'STANDARD'`. `WATERMARK_COLUMN` must be `'__TIMESTAMP'`. `LAST_WATERMARK_TEXT` is the comparison column for this track; it is never parsed during comparison. `MERGE_KEY_COLUMNS` is required - confirm the correct business key before inserting.
+`TRACK` must be `'STANDARD'`. `WATERMARK_COLUMN` must be `'__TIMESTAMP'`. `LAST_WATERMARK_TEXT` is the comparison column for this track; it is never parsed during comparison. Do not type `MERGE_KEY_COLUMNS`: standard products declare their primary key on the share, and `SP_LOAD_DECLARED_KEYS` fills it from `SHOW PRIMARY KEYS` (`KEY_SOURCE = 'DECLARED'`). The key is `RELY` - asserted by SAP, not enforced - so `SP_VERIFY_MERGE_KEYS` tests it and records `KEY_STATUS`. Any object the loader reports as having no key needs its grain entered by hand with `KEY_SOURCE = 'MANUAL'`.
 
 ### Step 6 (Standard) - Validate before scheduling
 
@@ -225,7 +227,7 @@ ZZLASTCHGDATE AS SOURCE_WRITE_TS
 
 The monitoring view reads `SOURCE_WRITE_TS` to detect connector staleness. The column name varies from the reference-tenant name `ZZLASTCHGDATE`; use the name found in your readiness assessment.
 
-**Confirm merge keys.** Catalog-linked tables carry no primary key constraint. The correct merge key for some SAP objects is not obvious from the column names. Purchase order history requires a seven-part key including `AccountAssignmentNumber` and `PurchasingHistoryCategory`. On a five-part key the table appears to contain duplicates, and de-duplicating on that key silently discards real goods movements. Confirm the grain before writing any MERGE.
+**Confirm merge keys.** Check first whether the product declares one: `SHOW PRIMARY KEYS IN DATABASE <LINKED_DB>`, or the probe's `keys.declared` finding. If it does, use `SP_LOAD_DECLARED_KEYS` as on the standard track. Custom products often declare none, and then the grain is yours to supply, with `KEY_SOURCE = 'MANUAL'`. The correct merge key for some SAP objects is not obvious from the column names. Purchase order history requires a seven-part key including `AccountAssignmentNumber` and `PurchasingHistoryCategory`. On a five-part key the table appears to contain duplicates, and de-duplicating on that key silently discards real goods movements. Confirm the grain before writing any MERGE, and run `SP_VERIFY_MERGE_KEYS()` on it.
 
 ### Step 4 (Custom) - Deploy monitoring and capture the baseline
 
@@ -294,12 +296,13 @@ The exception path cannot detect physical deletes. Schedule `VW_DELETE_RECONCILI
 ```sql
 INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
   (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, MERGE_KEY_COLUMNS,
-   OPERATION_COLUMN, LAST_WATERMARK)
+   KEY_SOURCE, OPERATION_COLUMN, LAST_WATERMARK)
 SELECT '<NAME>',
        '"<LINKED_DB>"."<LINKED_SCHEMA>"."<OBJECT_NAME>"',
        'CUSTOM',
        'ZZLASTCHGDATE',
-       '<KEY_COLUMN_1>,<KEY_COLUMN_2>',
+       '<KEY_COLUMN_1>,<KEY_COLUMN_2>',   -- or NULL + SP_LOAD_DECLARED_KEYS if it declares one
+       'MANUAL',
        NULL,
        NULL
 WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
@@ -330,7 +333,7 @@ On error, `LAST_WATERMARK` is left untouched. The next run repeats the same clos
 | Schema or object reference errors | Colon in schema name, mixed-case object names | Double-quote all identifiers |
 | Target has more rows than source (watermark path) | Physical deletes upstream not visible on watermark path | `VW_DELETE_RECONCILIATION`; rebuild the target table |
 | `TRY_PARSE_JSON` error on `STATISTICS` | `STATISTICS` is type `OBJECT`, not `VARCHAR` | Use colon path operator: `STATISTICS:numInsertedRows::NUMBER` |
-| Merge produces unexpected duplicates | Wrong grain supplied to `MERGE_KEY_COLUMNS` | Verify the full key against SAP documentation |
+| Merge produces unexpected duplicates | Wrong grain in `MERGE_KEY_COLUMNS`, or a declared key that no longer holds | Check `KEY_STATUS` (`SP_VERIFY_MERGE_KEYS`); prefer the declared key from `SP_LOAD_DECLARED_KEYS`; otherwise verify the full key against SAP documentation |
 | `SP_VALIDATE_STANDARD` returns `UNUSABLE` | Metadata corruption; `SOURCE_FQN` likely points at a local copy | `STANDARD_VALIDATION.FAULTS`; look for the `load_type_<hash>` column name (absent on copies) |
 | `__TIMESTAMP` parses as NULL everywhere | Comma decimal separator; `TRY_TO_TIMESTAMP_NTZ` silently returns NULL | Use `TRY_TO_TIMESTAMP_NTZ(REPLACE(col, ',', '.'))` for display; comparisons stay as raw text |
 | `SP_POLL_STANDARD` returns `NOT REGISTERED` | Object not in `WATERMARK` with `TRACK = 'STANDARD'` | Run the INSERT in Step 5 (Standard) |

@@ -25,6 +25,8 @@ The reference tenant carried 4 catalog-linked databases, 23 objects, and 1,825 c
 | Replication operation code | Absent - must be requested | Request from pipeline owner or accept row-count reconciliation only |
 | Load-phase flag | Optional - inferable without it | Request only if convenient to pipeline owner |
 
+**Primary key - not one of the four, but ask for it.** Standard data products now declare their primary key on the share (`SHOW PRIMARY KEYS`, `rely = true`). Custom data products may not: on the reference account the one custom product, `SAP_REFRESHDB_SHARE_V1`, declares none, while every standard object does. Without a declared key the grain has to be entered by hand and verified (`KEY_SOURCE = 'MANUAL'`, then `SP_VERIFY_MERGE_KEYS`), and a stream on a dynamic table cannot classify its `DELETE` + `INSERT` pairs as updates. Check with `SHOW PRIMARY KEYS IN DATABASE <cld>`; the probe's `keys.declared` finding lists every object without one.
+
 ---
 
 ## Capability 1: Change timestamp
@@ -152,7 +154,7 @@ The standard-track equivalent (`load_type_<hash>`) provided `initial` = 67,087 a
 
 ## What to hand a pipeline owner
 
-These four items structure the conversation with the pipeline owner or SAP BDC contact. They are not a product specification; they are a prioritised request list.
+These five items structure the conversation with the pipeline owner or SAP BDC contact. They are not a product specification; they are a prioritised request list.
 
 1. **Change timestamp (already present - verify).** Confirm the column name on your tenant and that it will remain `NOT NULL` in future product versions. Confirm it reflects the connector write time, not a business event date. Request the name be documented in the data product metadata.
 
@@ -160,9 +162,11 @@ These four items structure the conversation with the pipeline owner or SAP BDC c
 
 3. **Replication operation code (absent - must be requested).** Request either a per-row operation code column (distinguishing insert, update, physical delete) on every shared object, or a written guarantee that the data product is soft-delete only. This is the most consequential gap and the most dependent on pipeline owner cooperation.
 
-4. **Load-phase flag (optional).** If convenient to the pipeline owner, a column distinguishing initial load rows from delta rows. Lowest priority; defer if the conversation is already carrying items 1-3.
+4. **Primary key on every object.** Ask that the custom data product declare its key the way standard products do, so that `SHOW PRIMARY KEYS` returns it. It removes hand-entered grain - the most common source of silent merge errors - and makes update classification on the dynamic-table-plus-stream path possible. Until then, enter and verify the key yourself.
 
-Focus the request conversation on items 2 and 3. Item 2 is already in the data and requires only confirmation; item 3 is the only one that requires pipeline configuration or a formal commitment.
+5. **Load-phase flag (optional).** If convenient to the pipeline owner, a column distinguishing initial load rows from delta rows. Lowest priority; defer if the conversation is already carrying items 1-4.
+
+Focus the request conversation on items 2 and 3. Item 2 is already in the data and requires only confirmation; item 3 is the one that requires pipeline configuration or a formal commitment. Item 4 is a metadata change rather than a pipeline one, and standard products already show it can be done.
 
 ---
 
@@ -173,12 +177,13 @@ Where a dynamic table cannot serve (non-deterministic transformation, or target 
 ```sql
 INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
   (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, MERGE_KEY_COLUMNS,
-   OPERATION_COLUMN, LAST_WATERMARK)
+   KEY_SOURCE, OPERATION_COLUMN, LAST_WATERMARK)
 SELECT '<NAME>',
        '"<LINKED_DB>"."<LINKED_SCHEMA>"."<OBJECT_NAME>"',
        'CUSTOM',
        'ZZLASTCHGDATE',
        '<KEY_COLUMN_1>,<KEY_COLUMN_2>',
+       'MANUAL',
        NULL,
        NULL
 WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
@@ -186,3 +191,5 @@ WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
 ```
 
 `TRACK = 'CUSTOM'` is required. The `WATERMARK` table has a CHECK constraint; an insert with any other value fails with error 23514. `WATERMARK_COLUMN` must match the actual column name found by the probe on your tenant. `OPERATION_COLUMN` is NULL on this track - there is no operation column. The watermark procedure path is in `sql/04_watermark_exception_path.sql`.
+
+`KEY_SOURCE = 'MANUAL'` records that the grain was entered by hand. If the object does declare a key, register it with `MERGE_KEY_COLUMNS` NULL and run `SP_LOAD_DECLARED_KEYS('<LINKED_DB>')` instead. Either way run `SP_VERIFY_MERGE_KEYS()` before the first MERGE.

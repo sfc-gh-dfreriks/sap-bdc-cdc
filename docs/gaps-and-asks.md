@@ -64,11 +64,16 @@ Dynamic tables handle physical deletes correctly by diffing consecutive source s
 
 The replication timestamp on the custom track is a customer extension field added to the SAP source during SLT pipeline configuration. Its name - `ZZLASTCHGDATE` on the reference tenant - is set per BDC pipeline implementation. It may differ between data products on the same tenant, or be absent on a BDC deployment that was not configured to include it. The readiness assessment discovers the column name; do not assume a name.
 
-### Grain not declared on catalog-linked tables
+### Grain is declared on standard products, asserted rather than enforced, and may be absent on custom ones
 
-**Severity: medium.**
+**Severity: low on standard products (was medium); medium on custom products.**
 
-Catalog-linked tables carry no primary key constraint. The correct merge key for some SAP objects is not obvious from the column names. Purchase order history (EKBE) requires a seven-part key including `AccountAssignmentNumber` and `PurchasingHistoryCategory`. On a five-part key the table appears to hold duplicates, and de-duplicating on that key silently discards real goods movements without any error. Confirm the grain before writing any MERGE statement. This applies to both tracks.
+*Largely closed 2026-10-30.* Standard data products now declare a primary key on the share: `SHOW PRIMARY KEYS IN DATABASE <cld>` returns one row per key part with `rely = true`. On the reference account 54 of 55 objects across 8 of 9 shares declare one, and every declared key tested is unique - `customer` 3,450 / 3,450, `customerpartnerfunction` 56,663 / 56,663, `customersalesareatax` 43,085 / 43,085 on six parts, the object where a guessed four-part key once collapsed 39,462 rows to 14,017. Read the key from the share (`SP_LOAD_DECLARED_KEYS`) rather than typing it.
+
+Two things remain:
+
+- **RELY is not enforcement.** It records SAP's assertion; Snowflake does not check it, and a future publish could violate it without any error. Keep verifying - the probe's `keys.declared` check and `SP_VERIFY_MERGE_KEYS` test `COUNT(*)` against `COUNT(DISTINCT <key parts>)` and refuse a key that does not hold.
+- **Custom products may declare none.** The one custom product on the reference account (`SAP_REFRESHDB_SHARE_V1`) has no primary key. There the old rule still applies: the grain has to come from source-system knowledge, and it is easy to get wrong. Purchase order history (EKBE) requires a seven-part key including `AccountAssignmentNumber` and `PurchasingHistoryCategory`; on five parts it appears to hold duplicates, and de-duplicating on that key silently discards real goods movements. Enter it with `KEY_SOURCE = 'MANUAL'` and verify it.
 
 ### Uninitialised objects cannot be described
 
@@ -122,7 +127,7 @@ An INSERT_ONLY stream expires after 14 days if not consumed. A dynamic table doe
 | Non-deterministic expression enters a dynamic table query | `REFRESH_ACTION` becomes `FULL` on every cycle; cost rises silently. No error is raised. | `VW_REFRESH_AUDIT.UNEXPECTED_FULL_REFRESH = TRUE`; `SHOW DYNAMIC TABLES` exposes `refresh_mode_reason`. |
 | Connector stops writing | Dynamic table continues to report `NO_DATA` and appears healthy. Downstream consumers receive stale data with no signal. | `VW_RELOAD_DETECTION.CAPTURE_MODE = 'CONNECTOR STALLED'` when `LAST_WRITE` exceeds the staleness threshold. |
 | Parquet compaction widens file ranges | Watermark predicate scan cost rises toward a full scan (custom track); no error is raised. Dynamic tables are unaffected. | `VW_CAPTURE_EXCEPTIONS` `FILE_COUNT_DROP` row; file count drops below 70% of the baseline. |
-| Wrong merge key chosen (either track watermark path) | Duplicate rows in the target, or real records silently discarded. No constraint violation is raised. | Row count comparison between source and target; business-level data quality audits. |
+| Wrong merge key chosen (hand-entered key, or a declared key that stops holding) | Duplicate rows in the target, or real records silently discarded. No constraint violation is raised - a declared key is `RELY`, not enforced. | `keys.declared` in the probe; `SP_VERIFY_MERGE_KEYS` / `WATERMARK.KEY_STATUS` after every re-publish; row count comparison between source and target. |
 | Standard track metadata corruption enters the pipeline | Incremental merge produces wrong results silently; `__OPERATION_TYPE` does not contain change codes. | `SP_VALIDATE_STANDARD` / `VW_STANDARD_OPERATION_MIX`; re-run validation whenever the share is re-linked or a product is re-published. |
 
 ---
@@ -157,9 +162,13 @@ The replication timestamp on the custom track is a customer extension field. It 
 
 Without a column that distinguishes insert, update, and delete at row level, physical deletes are undetectable on the custom-track watermark path. An `_BDC_CHANGE_MODE` column - equivalent to `RECORDMODE` in classic SAP delta queues - would close this gap for the watermark path without requiring dynamic table snapshot diffing.
 
-### 6. Documented grain and primary key per object
+### 6. Declared primary key on every object - delivered for standard products; extend to custom products
 
-Catalog-linked tables carry no primary key constraint. For most objects, the business key is published in SAP documentation. For several it is not obvious. A machine-readable key specification in the data product metadata, or a supplementary reference document covering every object in each data product, would prevent silent merge key errors. This applies to both tracks.
+**Delivered for standard data products, 2026-10-30.** This ask was for a machine-readable key in the data product metadata; SAP now publishes it as a `RELY` primary key that `SHOW PRIMARY KEYS` returns. What remains:
+
+- **Custom data products.** Declare the key on these too. On the reference account the one custom product has none, so its grain is still hand-entered.
+- **Stability.** Document that a declared key is part of the data product contract - that it will not change between versions without a new version, and that RELY is backed by the source system's own uniqueness. Consumers merge on it and cannot detect a silent change except by re-testing.
+- **Coverage signal.** Say whether a data product without a declared key is expected to gain one, so a consumer knows whether to wait or hand-enter.
 
 ### 7. Guidance on uninitialised objects
 

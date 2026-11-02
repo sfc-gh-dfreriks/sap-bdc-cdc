@@ -46,9 +46,40 @@
    is handled if the product emits one, and so that its absence is reconciled
    rather than assumed benign.
 
-   Substitute <L2_DB> for your Gold database and <WH> for your warehouse.
-   Deploy 01_capture_control.sql first; this file extends it.
+   One thing these products now give you that they did not: the grain. Since
+   2026-10-30 SHOW PRIMARY KEYS on the catalog-linked database returns the key of
+   every standard object (rely = true). Section 0 registers objects with
+   MERGE_KEY_COLUMNS left NULL and fills it from the share. RELY is SAP's
+   assertion and Snowflake does not enforce it, so the key is verified too.
+
+   Substitute <L2_DB> for your Gold database, <CLD_DB> for the catalog-linked
+   database and <WH> for your warehouse. Deploy 01_capture_control.sql first;
+   this file extends it.
    ========================================================================== */
+
+
+/* ---------------------------------------------------------------------------
+   0. Register and key. Register each standard object with no key, then read
+      the declared keys from the share and verify them. An object that declares
+      no key keeps MERGE_KEY_COLUMNS NULL and is reported by the loader; enter its
+      grain by hand with KEY_SOURCE = 'MANUAL'.
+
+   INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
+     (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, OPERATION_COLUMN)
+   SELECT 'CUSTOMER_SALES_AREA_TAX',
+          '<CLD_DB>."customer"."customersalesareatax"',
+          'STANDARD', '__TIMESTAMP', '__OPERATION_TYPE'
+   WHERE NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
+                     WHERE OBJECT_NAME = 'CUSTOMER_SALES_AREA_TAX');
+
+   CALL <L2_DB>.CAPTURE_CONTROL.SP_LOAD_DECLARED_KEYS('<CLD_DB>');
+   CALL <L2_DB>.CAPTURE_CONTROL.SP_VERIFY_MERGE_KEYS();   -- expect: all unique
+
+      That object is the one that justifies reading the key rather than
+      guessing it: its declared key has six parts, and a plausible four-part key
+      once collapsed 39,462 rows to 14,017. Measured 2026-11-02: 43,085 rows,
+      43,085 distinct on the declared six.
+   --------------------------------------------------------------------------- */
 
 
 /* ---------------------------------------------------------------------------
@@ -234,14 +265,40 @@ FROM   <L2_DB>.CAPTURE_CONTROL.WATERMARK;
       downstream is forced to FULL too.
 
       The MERGE below is the exception path: non-deterministic transformations,
-      or an external consumer that needs a physical delta table. Two things about
-      it are easy to get wrong.
+      or an external consumer that needs a physical delta table. Three things are
+      easy to get wrong; the second applies to the stream alternative.
 
-      First, the grain. A catalog-linked table declares no primary key, so
-      MERGE_KEY_COLUMNS has to be supplied per object from source-system
-      knowledge. Getting it short does not error; it silently collapses rows.
+      First, the grain. Join on every part of MERGE_KEY_COLUMNS as filled by
+      section 0, quoted - the declared names are camel case. Only merge on a
+      key whose KEY_STATUS is UNIQUE: a short key does not error, it silently
+      collapses rows.
 
-      Second, deletes. No delete code was observed on the reference share - only
+      Second, updates on the DT + stream path. If you consume a standard stream
+      on a dynamic table instead of this MERGE, METADATA$ISUPDATE is always
+      FALSE and an update arrives as a DELETE + INSERT pair. With a verified key
+      the pair can be classified: join DELETE to INSERT on the key in the same
+      stream read; a differing hash of the business columns is an update, an
+      identical hash is a re-delivery and can be dropped; a DELETE with no
+      INSERT partner is a delete. The MERGE converges either way - the
+      classification is for consumers who need to tell U from D+I.
+
+      SELECT COALESCE(i.k, d.k) AS k,
+             CASE WHEN d.k IS NULL THEN 'I'
+                  WHEN i.k IS NULL THEN 'D'
+                  WHEN i.h <> d.h  THEN 'U'
+                  ELSE 'NOOP' END AS change_kind
+      FROM      (SELECT <key parts> AS k, HASH(<business columns>) AS h
+                 FROM <stream> WHERE METADATA$ACTION = 'INSERT') i
+      FULL JOIN (SELECT <key parts> AS k, HASH(<business columns>) AS h
+                 FROM <stream> WHERE METADATA$ACTION = 'DELETE') d
+             ON i.k = d.k;
+
+      Exclude __TIMESTAMP, load_type and run_id from the hash, or every
+      re-delivery reads as an update. Read the stream once (into a temporary
+      table) if the classification and the MERGE must see the same offset.
+
+      Third, deletes. No delete code was observed on the reference share - only
+
       'L' and 'A' - so whether this product ever emits one is unverified. The
       DELETE branch is therefore written but commented, and the reconciliation
       query after it is not optional: if the source hard-deletes and the share

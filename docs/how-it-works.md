@@ -25,6 +25,7 @@ Three behaviours are worth knowing before you start:
 
 - `INFORMATION_SCHEMA.COLUMNS` returns no rows for a catalog-linked database. `DESCRIBE TABLE` is the only route to a column list, one statement per object. There is no bulk alternative.
 - Schema names contain a colon (for example `"dp_finance_v2_srv:v1"`) and object names are mixed case. Every reference in SQL must be double-quoted.
+- Standard data products **declare their primary key**. Since 2026-10-30 `SHOW PRIMARY KEYS IN DATABASE <cld>` returns one row per key part - `table_name`, `column_name`, `key_sequence`, a `SYS_CONSTRAINT_<uuid>` name and `rely = true`. On the reference account 54 of 55 objects across 8 of 9 shares declare one; the exception is a custom data product. The rows come back unordered, so reassemble each key by `key_sequence`. `RELY` means SAP asserts the key; Snowflake does not enforce it. Every declared key tested so far holds - including `customersalesareatax`, 43,085 rows unique on six parts, where a guessed four-part key once collapsed 39,462 rows to 14,017 - but verify rather than assume: the probe's `keys.declared` check and `SP_VERIFY_MERGE_KEYS` both do.
 - A share can advertise a table that has never been materialised. `DESCRIBE TABLE` on such an object fails with `table 'refresh_table' is not initialized`. That is a property of the share, not a fault in the caller. Tooling must tolerate the per-object failure and continue. The probe handles this already.
 
 ---
@@ -81,6 +82,23 @@ WHEN NOT MATCHED AND s.METADATA$ACTION = 'INSERT' THEN INSERT ...;
 ```
 
 The `DELETE` arm removes the old image and the `INSERT` arm re-adds the new one, so a `DELETE` + `INSERT` pair converges on the correct row whether or not it was flagged as an update. Never make correctness contingent on `METADATA$ISUPDATE`.
+
+**With a declared key, the pair can be classified.** The MERGE above converges without knowing which pairs were updates, but a consumer that needs insert / update / delete as distinct events can recover them by joining the stream's `DELETE` rows to its `INSERT` rows on the primary key read from the share:
+
+```sql
+WITH ins AS (SELECT <key parts> AS k, HASH(<business columns>) AS h
+             FROM STR_MATERIAL WHERE METADATA$ACTION = 'INSERT'),
+     del AS (SELECT <key parts> AS k, HASH(<business columns>) AS h
+             FROM STR_MATERIAL WHERE METADATA$ACTION = 'DELETE')
+SELECT COALESCE(ins.k, del.k) AS k,
+       CASE WHEN del.k IS NULL THEN 'I'
+            WHEN ins.k IS NULL THEN 'D'
+            WHEN ins.h <> del.h THEN 'U'
+            ELSE 'NOOP' END AS change_kind      -- NOOP: re-delivery, drop it
+FROM ins FULL JOIN del ON ins.k = del.k;
+```
+
+Leave `__TIMESTAMP`, `load_type_*` and `run_id_*` out of the hash, or every re-delivery reads as an update. This is only as good as the key: on a key that is too short two different rows pair up and an insert-plus-delete is misreported as an update, which is why the key is verified before it is used. A `NOOP` pair is also what an upstream file rewrite looks like row by row, so this classification is how you would tell compaction churn (below) from real change. On an object with no declared key, fall back to the convergent MERGE and do not classify.
 
 `APPEND_ONLY` is not supported for streams on dynamic tables. For insert-only semantics, consume the standard stream and filter on `METADATA$ACTION = 'INSERT'`.
 

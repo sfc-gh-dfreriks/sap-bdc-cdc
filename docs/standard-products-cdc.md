@@ -110,30 +110,43 @@ ORDER  BY VERDICT DESC, OBJECT_NAME;
 
 ---
 
-## Step 3 - Register in WATERMARK
+## Step 3 - Register, then read and verify the declared key
 
 After validation passes, register each standard-track object. The `WATERMARK` table is created by `sql/01_capture_control.sql` and carries a `TRACK` column with a CHECK constraint - any insert must specify `'STANDARD'` or `'CUSTOM'`; other values are rejected with error 23514.
+
+Leave `MERGE_KEY_COLUMNS` out. Standard data products declare their primary key on the share, so the key is read, not typed:
 
 ```sql
 INSERT INTO <L2_DB>.CAPTURE_CONTROL.WATERMARK
   (OBJECT_NAME, SOURCE_FQN, TRACK, WATERMARK_COLUMN, OPERATION_COLUMN,
-   MERGE_KEY_COLUMNS, LAST_WATERMARK_TEXT)
+   LAST_WATERMARK_TEXT)
 SELECT '<NAME>',
        '"<LINKED_DB>"."<LINKED_SCHEMA>"."<OBJECT_NAME>"',
        'STANDARD',
        '__TIMESTAMP',
        '__OPERATION_TYPE',
-       '<KEY_COLUMN_1>,<KEY_COLUMN_2>',
        NULL
 WHERE  NOT EXISTS (SELECT 1 FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK
                     WHERE OBJECT_NAME = '<NAME>');
+
+CALL <L2_DB>.CAPTURE_CONTROL.SP_LOAD_DECLARED_KEYS('<LINKED_DB>');
+CALL <L2_DB>.CAPTURE_CONTROL.SP_VERIFY_MERGE_KEYS();
 ```
 
 `WATERMARK_COLUMN` must be `'__TIMESTAMP'` - the fixed-name column, two leading underscores. `LAST_WATERMARK_TEXT` is the comparison column for this track; it stores the raw text value and is never parsed during comparison. `OPERATION_COLUMN` must be `'__OPERATION_TYPE'`.
 
-`MERGE_KEY_COLUMNS` is required and has no default. A wrong grain silently produces duplicate rows or discards real records without any constraint violation. Confirm the business key against SAP data product documentation before inserting.
+`SP_LOAD_DECLARED_KEYS` runs `SHOW PRIMARY KEYS IN DATABASE`, stores the result in `CAPTURE_CONTROL.DECLARED_KEY`, and fills `MERGE_KEY_COLUMNS` (ordered by `key_sequence`) with `KEY_SOURCE = 'DECLARED'`. It reports any registered object that declares no key. `SP_VERIFY_MERGE_KEYS` then tests every key with `COUNT(*)` against `COUNT(DISTINCT <key parts>)` and records `KEY_STATUS`. The declared key carries `rely = true`, which is SAP's assertion; Snowflake does not enforce it, so the test is not optional. The readiness probe's `keys.declared` finding runs the same test before you deploy anything.
 
-**Success criterion:** `SELECT * FROM <L2_DB>.CAPTURE_CONTROL.WATERMARK WHERE TRACK = 'STANDARD'` returns one row per registered object.
+If an object declares no key, enter its grain by hand with `KEY_SOURCE = 'MANUAL'` - the loader never overwrites a manual key - and confirm it against SAP data product documentation. A wrong grain silently produces duplicate rows or discards real records without any constraint violation. Re-run both procedures whenever a product is re-published.
+
+**Success criterion:** every registered standard object has `MERGE_KEY_COLUMNS` populated and `KEY_STATUS = 'UNIQUE'`:
+
+```sql
+SELECT OBJECT_NAME, KEY_SOURCE, MERGE_KEY_COLUMNS, KEY_STATUS
+FROM   <L2_DB>.CAPTURE_CONTROL.WATERMARK
+WHERE  TRACK = 'STANDARD'
+ORDER  BY KEY_STATUS NULLS FIRST, OBJECT_NAME;
+```
 
 ---
 
