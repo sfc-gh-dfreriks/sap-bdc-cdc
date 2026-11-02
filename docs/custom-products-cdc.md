@@ -124,6 +124,10 @@ WHERE  TARGET_COUNT > SOURCE_COUNT;
 
 A persistent positive divergence means physical deletes occurred upstream and the target has not absorbed them. Rebuild the target table. Identifying which specific rows were deleted is impractical on the watermark path.
 
+**If deletes matter to you, do not settle for reconciliation.** The requests above are still worth making - a source-side operation code is the cleanest answer and benefits every consumer of the data product - but you are not blocked while you wait for one. Put a dynamic table over the share and a standard stream on that dynamic table: the dynamic table detects the delete by diffing snapshots, and the stream exposes it as a `DELETE` record with `METADATA$ACTION` and `METADATA$ROW_ID` populated, so you know *which* rows went. This requires nothing from the pipeline owner and works on the custom track despite the missing operation column. It has been validated with a customer. Reconciliation then becomes a safety net rather than your only delete signal.
+
+The one thing it does not give you is an update flag - `METADATA$ISUPDATE` is always `FALSE`, so an update arrives as a `DELETE` + `INSERT` pair for the same key. Write the MERGE so that pair converges correctly rather than depending on the flag. Full pattern and caveats: [how-it-works.md](how-it-works.md#the-interposition-that-does-work-a-stream-on-a-dynamic-table).
+
 ---
 
 ## Capability 4: Load-phase flag

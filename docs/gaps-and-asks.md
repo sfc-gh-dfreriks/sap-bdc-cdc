@@ -181,7 +181,25 @@ A read-only `CHANGES()` implementation that reads Iceberg snapshot metadata - wi
 
 Currently refused with: *change_tracking cannot be set for Iceberg tables unless they use Snowflake catalog.*
 
-Even a read-only implementation that consumes existing Iceberg snapshot history, rather than writing CDC metadata, would allow streams to expose `METADATA$ACTION` and `METADATA$ISUPDATE` to consumers. This would also enable delete detection that `_BDC_CHANGE_MODE` would otherwise provide on the custom track.
+Even a read-only implementation that consumes existing Iceberg snapshot history, rather than writing CDC metadata, would allow streams to expose `METADATA$ACTION` and `METADATA$ISUPDATE` to consumers **directly on the share**, removing the need to materialize a dynamic table first.
+
+**Partly superseded — reduced in priority.** The delete-detection half of this ask is already achievable today: a dynamic table over the share plus a standard stream on that dynamic table yields working `METADATA$ACTION` and `METADATA$ROW_ID`, including deletes, on both tracks. Field-validated with a customer (Endress+Hauser). See [how-it-works.md](how-it-works.md#the-interposition-that-does-work-a-stream-on-a-dynamic-table).
+
+What remains genuinely unmet is narrower, and worth stating precisely:
+
+- **Update identification.** `METADATA$ISUPDATE` is always `FALSE` on this path, so an update is indistinguishable from a delete-plus-insert of the same key. The cause is that the Delta-to-Iceberg read path does not consume Delta **Row Tracking**. Consuming it, or Iceberg v3 row lineage where the source provides it, would close this.
+- **Avoiding the materialization.** The interposition requires a dynamic table, which means storage and refresh compute the consumer would not otherwise pay for, plus a 14-day stream staleness window. Direct change tracking would remove both.
+
+### 2a. Delta Change Data Feed support
+
+The customer ask, stated in their words: support the Delta Lake **Change Data Feed (CDF)** API. CDF writes changes to separate files and identifies updates unambiguously, rather than deriving them from file-version comparison.
+
+The current Delta-to-Iceberg read path explicitly does not support `Row Tracking`, `change data files`, `change metadata`, `DataChange`, `CDC`, or protocol evolution. Two consequences follow that a snapshot-diff approach cannot address:
+
+1. **Updates cannot be identified** — the `METADATA$ISUPDATE` gap above is a direct symptom.
+2. **Optimize/compaction bills like a full reload.** When a Delta table is optimized, small Parquet files merge into larger ones with no business-data change. A snapshot comparison does not recognise that as a no-op. **Measured:** on a 5,000-row source, a rewrite with zero logical change produced 10,000 rows of target churn (5,000 inserted, 5,000 deleted, none copied) against 2 rows of churn for a genuine single-row update on the same table - a factor of 5,000. The cost is `2 x row count` and scales with the table rather than the change. On a non-SOLEX account the data-sharing fee is metered on the compute that consumes, so an upstream optimize the consumer does not control can bill like a full reload while changing nothing. A native change feed captures actual row changes and is largely immune. *Measured with `INSERT OVERWRITE` on a Snowflake table as a proxy for the mechanism - genuine partition consolidation, but not a Delta `OPTIMIZE` through the Delta-to-Iceberg read path; see how-it-works.md for the caveats.*
+
+Deletion vectors are worth separating from this ask, because they are already supported for reads: as of the 2026-03-02 release Snowflake reads Delta-based Iceberg tables containing deletion vectors (`minReaderVersion 3`, Delta 4.0.0). What is *not* available is any way to exploit them as a diff accelerator — a merge-on-read delete is resolved correctly, but the dynamic table still performs a full comparison, so the latency benefit the format offers is not passed through.
 
 ### 3. Longer time travel on catalog-linked shares
 
@@ -189,7 +207,18 @@ Even a read-only implementation that consumes existing Iceberg snapshot history,
 
 ### 4. A first-class change feed for catalog-linked databases
 
-The current options are INSERT_ONLY streams (no deletes, 14-day expiry, no standard metadata columns) and dynamic tables (full snapshot diff, no direct stream interface). A purpose-built change feed that reads Iceberg snapshot diffs and exposes them as a standard Snowflake stream - without requiring the consumer to own the catalog - would be the complete long-term answer. The four items above are partial mitigations; this is what they collectively point toward.
+The current options are INSERT_ONLY streams (no deletes, 14-day expiry, no standard metadata columns), dynamic tables (full snapshot diff, no direct stream interface), and a dynamic table with a stream on it (working deletes and metadata, at the cost of materializing the data and with no update flag). A purpose-built change feed that reads Iceberg snapshot diffs and exposes them as a standard Snowflake stream - without requiring the consumer to own the catalog or to materialize a copy - would be the complete long-term answer. The items above are partial mitigations; this is what they collectively point toward.
+
+Two additions to the requirement, both from customer feedback:
+
+- It must **identify updates**, not just emit delete/insert pairs. This is the capability gap that the DT-plus-stream interposition cannot close at all.
+- It should be **insensitive to physical file reorganization**, so that Delta optimize/compaction does not present as business change.
+
+### 5. Predictable arrival latency, and a way to attribute it
+
+A change written in SAP Datasphere becomes visible in Snowflake anywhere between near-immediately and roughly 20 minutes later, per customer measurement. Documented polling defaults do not explain that spread: catalog-linked databases sync on `SYNC_INTERVAL_SECONDS` (default 30s) and Delta-based auto-refresh polls on `REFRESH_INTERVAL_SECONDS` (default 30s).
+
+`SYSTEM$AUTO_REFRESH_STATUS` already lets a consumer separate the Snowflake-side component (the gap between `lastSnapshotTime` and when Snowflake processed it) from whatever happens upstream. What is missing is documentation of the end-to-end path - specifically whether the SAP-side Delta-to-Iceberg metadata conversion is event-driven or scheduled - so that a customer can set `TARGET_LAG` against a known bound rather than an observed worst case. This is partly a question for SAP rather than Snowflake, and should be put to both.
 
 ---
 

@@ -31,7 +31,7 @@ Three behaviours are worth knowing before you start:
 
 ## What the platform refuses
 
-The three standard CDC mechanisms Snowflake offers are all unavailable, for one shared reason - the catalog is external:
+The three standard CDC mechanisms Snowflake offers are all unavailable **on the share objects themselves**, for one shared reason - the catalog is external:
 
 | You attempt | Error |
 | --- | --- |
@@ -43,7 +43,59 @@ The three standard CDC mechanisms Snowflake offers are all unavailable, for one 
 
 **INSERT_ONLY stream.** A stream with `INSERT_ONLY = TRUE` is permitted. It creates successfully and positions at the current state, returning zero rows at creation. It sees inserts and updates but cannot detect physical deletes - that requires comparing two source snapshots, which INSERT_ONLY mode does not do. The 14-day staleness window applies: an unread stream expires after that period. The same procedural code required here is also required for the watermark path, but with less capability and an additional staleness risk. There is no situation in which the INSERT_ONLY stream path is preferable to the watermark path.
 
-**Metadata columns.** `METADATA$ACTION`, `METADATA$ISUPDATE`, and `METADATA$ROW_ID` do not resolve on catalog-linked objects. `METADATA$FILENAME` works and exposes the underlying Parquet file paths.
+**Metadata columns.** `METADATA$ACTION`, `METADATA$ISUPDATE`, and `METADATA$ROW_ID` do not resolve **when queried against a catalog-linked object directly**. `METADATA$FILENAME` works and exposes the underlying Parquet file paths. This is a property of the share object, not a dead end - see the interposition below, where `METADATA$ACTION` and `METADATA$ROW_ID` do resolve.
+
+### The interposition that does work: a stream on a dynamic table
+
+Every refusal above is scoped to the share object. A dynamic table built over the share is an ordinary Snowflake object that **you** own, so a standard stream on *it* is legal - and that stream exposes the change feed the share will not.
+
+```sql
+-- DT over the share does the snapshot diff
+CREATE DYNAMIC TABLE DT_MATERIAL
+  TARGET_LAG = '15 minutes' WAREHOUSE = LOAD_WH REFRESH_MODE = INCREMENTAL
+AS SELECT * FROM <catalog_linked_db>."<schema>"."material";
+
+-- standard stream on the DT: full metadata, deletes included
+CREATE STREAM STR_MATERIAL ON DYNAMIC TABLE DT_MATERIAL;
+```
+
+**This closes the delete gap on both tracks, including the custom track.** The dynamic table detects the delete by diffing snapshots; the stream is what lets a consumer *read* it as a change record rather than inferring it from a row-count reconciliation. No operation column is required, so it does not depend on `__OPERATION_TYPE` or on the pipeline owner exposing a change mode.
+
+Field-validated by a customer (Endress+Hauser, SAP Datasphere source) on an SAP data product: with material 2 deleted, 4 inserted and 3 updated, the stream returned the corresponding `INSERT` and `DELETE` records with `METADATA$ROW_ID` populated.
+
+**Independently confirmed on a second tenant** against `COREWORKFORCEDATA_V1."coreworkforcedata"."coreworkforce_standardfields"`, a SuccessFactors data product on a catalog-linked share. All three native mechanisms were refused on the share object with the errors in the table above (`091104`, `091947`, `093654`); a dynamic table over it created with `REFRESH_MODE = INCREMENTAL` and no fallback reason; a standard stream on that dynamic table created; and `METADATA$ACTION`, `METADATA$ISUPDATE` and `METADATA$ROW_ID` all resolved. Reproduce with `probes/change_feed_probe.py`.
+
+**One real limitation: `METADATA$ISUPDATE` is always `FALSE` here.** An update surfaces as a `DELETE` + `INSERT` pair for the same key rather than as a flagged update. The cause is that Snowflake's Delta-to-Iceberg read path does not consume Delta **Row Tracking** (see [Format constraints](#format-constraints-that-shape-all-of-this)), so no row-level lineage is available to mark the pair as an update.
+
+A control measurement supports that attribution rather than assuming it. On a *Snowflake-owned* source table, the same DT-plus-stream construction did flag the update correctly: deleting one row, inserting another and updating a third produced `3:INSERT/isupd=True` and `3:DELETE/isupd=True` alongside `isupd=False` on the genuine insert and delete. So `METADATA$ISUPDATE` is not broken for streams on dynamic tables as a feature - the signal is lost specifically on the external Delta path, which is where the customer observed it.
+
+Do not treat this as an Iceberg-specific defect to be worked around. Snowflake's own guidance on streams on dynamic tables warns that after a dynamic table is reinitialized, previously-updated rows appear as `DELETE` + `INSERT` pairs with `METADATA$ISUPDATE = FALSE` **even in fully native cases**, and that logic depending on that column "can lose or duplicate data without an error." The correct pattern is the same one you would write for a native DT:
+
+```sql
+MERGE INTO target t
+USING (SELECT *, METADATA$ACTION, METADATA$ISUPDATE FROM STR_MATERIAL) s
+  ON t.MaterialNumber = s.MaterialNumber
+WHEN MATCHED AND s.METADATA$ACTION = 'DELETE' AND NOT s.METADATA$ISUPDATE THEN DELETE
+WHEN MATCHED AND s.METADATA$ACTION = 'INSERT' THEN UPDATE SET ...
+WHEN NOT MATCHED AND s.METADATA$ACTION = 'INSERT' THEN INSERT ...;
+```
+
+The `DELETE` arm removes the old image and the `INSERT` arm re-adds the new one, so a `DELETE` + `INSERT` pair converges on the correct row whether or not it was flagged as an update. Never make correctness contingent on `METADATA$ISUPDATE`.
+
+`APPEND_ONLY` is not supported for streams on dynamic tables. For insert-only semantics, consume the standard stream and filter on `METADATA$ACTION = 'INSERT'`.
+
+### Format constraints that shape all of this
+
+BDC surfaces Delta-format tables through an Iceberg read path, and that conversion decides what change metadata can exist at all.
+
+| Capability | Status | Consequence here |
+| --- | --- | --- |
+| Delta **Row Tracking** | not supported on the Delta-to-Iceberg read path | why `METADATA$ISUPDATE` is always `FALSE` |
+| Delta **Change Data Feed** (CDF) | not supported (`change data files`, `change metadata`, `DataChange`, `CDC` all unsupported) | no native change feed to read; the DT diff is the substitute |
+| Iceberg **row lineage** | requires Iceberg **v3** | unavailable on a Delta-sourced share, so no update flagging |
+| Delta **deletion vectors** | readable since the 2026-03-02 release (`minReaderVersion 3`, Delta 4.0.0) | deletes read correctly; **not** exposed as a diff accelerator, so no latency gain |
+
+Two cautions on that last row. Legacy *external tables* over Delta still do not support deletion vectors - only the Iceberg/Delta Direct read path does. And reading deletion vectors is not the same as using them to shortcut the snapshot comparison: a merge-on-read delete is resolved correctly, but the dynamic table still performs its own diff. Whether a given tenant benefits is unverified - measure it rather than assuming.
 
 **Time travel.** `DATA_RETENTION_TIME_IN_DAYS` is fixed at 1 on the catalog-linked objects and cannot be altered. Time travel is unavailable at 36 hours. `AT(OFFSET => ...)` for historical comparisons on source objects beyond 24 hours is not available.
 
@@ -125,28 +177,54 @@ Symptom of the problem: `REFRESH_ACTION = FULL` appearing in `VW_REFRESH_AUDIT` 
 
 ## Choosing a mechanism
 
-| | Dynamic table | Watermark + MERGE | INSERT_ONLY stream |
-| --- | --- | --- | --- |
-| Inserts | yes | yes | yes |
-| Updates | yes | yes | yes |
-| Physical deletes | yes - diffs snapshots | custom track: no (no operation column). standard track: structurally possible, unverified - see [standard-products-cdc.md](standard-products-cdc.md) | no - by definition |
-| Cheap no-change detection | yes (`NO_DATA`) | yes (0 MB from manifest statistics on both tracks) | yes |
-| Code required | none | task + control table + MERGE | task + MERGE |
-| Can feed targets outside Snowflake | no | yes | yes |
-| Goes stale if unread | no | no | yes, 14 days |
-| Blocked by non-deterministic SQL | yes | no | no |
+| | Dynamic table | DT + stream on the DT | Watermark + MERGE | INSERT_ONLY stream |
+| --- | --- | --- | --- | --- |
+| Inserts | yes | yes | yes | yes |
+| Updates | yes | yes, but as a `DELETE`+`INSERT` pair (`ISUPDATE` always `FALSE`) | yes | yes |
+| Physical deletes | yes - diffs snapshots | **yes, readable as change records** | custom track: no (no operation column). standard track: structurally possible, unverified - see [standard-products-cdc.md](standard-products-cdc.md) | no - by definition |
+| Standard metadata columns | n/a | `METADATA$ACTION`, `METADATA$ROW_ID` resolve | no | no |
+| Cheap no-change detection | yes (`NO_DATA`) | yes (inherits the DT) | yes (0 MB from manifest statistics on both tracks) | yes |
+| Code required | none | none for capture; a MERGE to apply | task + control table + MERGE | task + MERGE |
+| Can feed targets outside Snowflake | no | yes - consume the stream | yes | yes |
+| Goes stale if unread | no | yes, 14 days | no | yes, 14 days |
+| Blocked by non-deterministic SQL | yes | yes (inherits the DT) | no | no |
 
-**Use dynamic tables on both tracks.** They are the only mechanism that reliably handles physical deletes, and they require no code. Reserve the watermark path for the two cases dynamic tables cannot serve: a transformation containing a non-deterministic expression, and a target outside Snowflake.
+**Use dynamic tables on both tracks.** They are the mechanism that reliably detects physical deletes, and they require no code. Add a **stream on the dynamic table** when a consumer needs to *read* those changes as records - which is what makes deletes actionable on the custom track, and what lets you feed a target outside Snowflake without the watermark path. Reserve the watermark path for the two cases dynamic tables cannot serve: a transformation containing a non-deterministic expression, and a target outside Snowflake where you do not want a stream to expire.
+
+Note the one cost of adding the stream: like any stream, it goes stale after 14 days unread, whereas a bare dynamic table does not. If nothing consumes the change feed on a schedule, do not create it.
 
 The watermark's more useful role is as a **trigger** rather than an engine. Polling it is free on both tracks - 0.00 MB on the custom track, 0.000 MB on the standard track - so a task can check whether the source moved and refresh a dynamic table only when it did, instead of refreshing on a fixed schedule and discovering nothing changed.
 
-Regardless of mechanism, schedule row-count reconciliation between source and target for every monitored object on both tracks. Physical deletes are invisible on the custom-track watermark path. On the standard track, no delete code was observed on the reference share; their presence on any specific tenant and product is unverified.
+Regardless of mechanism, schedule row-count reconciliation between source and target for every monitored object on both tracks. Physical deletes are invisible on the custom-track watermark path - if that is the gap you are trying to close, prefer a stream on the dynamic table over reconciliation, which tells you a divergence exists but not which rows caused it. On the standard track, no delete code was observed on the reference share; their presence on any specific tenant and product is unverified.
+
+**Measured risk: a file rewrite costs a full reload.** When a source table is optimized, small files are merged into larger ones with no change to the business data. A snapshot-diffing dynamic table does not recognise that as a no-op - it registers every row as deleted and reinserted. Measured on this account:
+
+| Event on a 5,000-row source | Target churn | Rows copied | Source rows considered changed |
+| --- | --- | --- | --- |
+| One genuine single-row update | 2 (1 insert, 1 delete) | 4,999 | 10,000 |
+| Zero logical change, all files rewritten | **10,000** (5,000 insert, 5,000 delete) | 0 | 10,000 |
+
+The rewrite cost is `2 x row count` - every row deleted and reinserted - and it scales with the table, not with the change: a 3-row table produced churn 6, a 5,000-row table produced churn 10,000. Against the single real update on the same table that is a factor of 5,000. A stream on the dynamic table emits the whole table as change records, so any downstream MERGE re-applies every row.
+
+Two honest caveats on those figures. They were produced with `INSERT OVERWRITE` on a Snowflake table, which is a faithful proxy for the *mechanism* - the refresh reported partitions removed and re-added, so it is genuine compaction - but it is not a Delta `OPTIMIZE` seen through the Delta-to-Iceberg read path. And `INSERT OVERWRITE` rewrites every file, whereas a real optimize may touch only a subset, so treat `2 x rows` as the upper bound for a full rewrite rather than the expected cost of every optimize.
+
+The consequence is the same either way: on a non-SOLEX account the data-sharing fee is metered on the compute this consumes, so an upstream optimize you do not control can bill like a full reload while changing nothing. Before committing to a tight `TARGET_LAG` on a table that is regularly optimized, ask the data product owner how often it happens. `probes/change_feed_probe.py` reproduces the measurement.
 
 ---
 
 ## Freshness measurement
 
 Use `SYSDATE()` for the current-time reference in any freshness or lag calculation. `CURRENT_TIMESTAMP()` is session-timezone-aware; on a UTC-7 session it reported a real 109-minute lag as -311 minutes when mixed with a UTC watermark. `SYSDATE()` returns UTC as `TIMESTAMP_NTZ` regardless of session timezone. This applies to both tracks.
+
+### Arrival latency is not a constant, and it is not all yours
+
+A change written in SAP Datasphere does not become visible in Snowflake on a predictable interval. One customer measured the same write appearing almost immediately in some cases and after roughly **20 minutes** in others.
+
+That range is not explained by the documented polling defaults. A catalog-linked database polls the remote catalog on `SYNC_INTERVAL_SECONDS` (default 30 seconds), and Delta-based automated refresh polls storage on `REFRESH_INTERVAL_SECONDS` (also 30 seconds by default). A 20-minute delay therefore points somewhere other than steady-state Snowflake polling - most likely the SAP-side Delta-to-Iceberg metadata conversion, or a refresh interval configured well above the default.
+
+**Attribute the delay before escalating it**, using `SYSTEM$AUTO_REFRESH_STATUS`. It returns `lastSnapshotTime` - when the snapshot was created in the external catalog - alongside the time Snowflake successfully processed it. The gap between those two values is Snowflake-side; anything before `lastSnapshotTime` is upstream of Snowflake and belongs in a conversation with SAP. `SHOW ICEBERG TABLES` exposes the same status per object in its `auto_refresh_status` column.
+
+This matters directly for `TARGET_LAG`. A dynamic table cannot be fresher than its source, so setting lag below the *arrival* latency buys nothing and pays for refresh cycles that find no changes. Measure arrival latency first, and treat its upper bound - not its median - as the floor for `TARGET_LAG`.
 
 ---
 

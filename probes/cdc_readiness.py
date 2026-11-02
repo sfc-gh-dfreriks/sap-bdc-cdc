@@ -20,8 +20,11 @@ both, so every object is classified individually:
             operation column means deletes can be represented, so this track is
             preferred wherever it exists.
   custom    the pipeline owner exposes a source-system change timestamp such as the SLT
-            extension field ZZLASTCHGDATE. There is no operation column, so deletes are
-            invisible and row counts must be reconciled separately.
+            extension field ZZLASTCHGDATE. There is no operation column, so the source
+            signal cannot represent a delete and row counts must be reconciled
+            separately. Note this constrains the *signal*, not your options: a dynamic
+            table over the share plus a stream on that dynamic table detects deletes on
+            either track. See docs/how-it-works.md.
 
 The questions it answers, in the order they matter:
 

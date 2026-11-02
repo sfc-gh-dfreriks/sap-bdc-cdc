@@ -7,15 +7,19 @@ engine.
 **The short version:** it works, and the mechanism is a platform feature rather than
 something you write. Dynamic tables refresh incrementally over a catalog-linked share and
 detect no-change in a few hundred milliseconds. A replication watermark is available for the
-cases dynamic tables cannot serve. Streams, `CHANGES()` and change tracking are all refused,
-for one reason that explains most of this repository: the objects are Iceberg tables on an
-external catalog.
+cases dynamic tables cannot serve. Streams, `CHANGES()` and change tracking are all refused
+**directly on the share objects**, for one reason that explains most of this repository: they
+are Iceberg tables on an external catalog. That refusal is not the end of the story — put a
+dynamic table over the share and a standard stream on *that*, and you get a real change feed
+with deletes. See [the interposition that works](docs/how-it-works.md#the-interposition-that-does-work-a-stream-on-a-dynamic-table).
 
 **There are two tracks, and which one you get is decided by SAP, not by you.** Standard data
 products arrive with change metadata that SAP generates. Custom data products carry only
 whatever change timestamp the pipeline owner chose to expose. The signals are not
 interchangeable — one can represent a delete and the other cannot — so the first job is to
-find out which you have, per object. The probe does that.
+find out which you have, per object. The probe does that. (Which track you are on decides what
+the *source signal* can express; it does not decide whether you can detect deletes at all —
+the dynamic table plus stream does that on either track.)
 
 ![Where capture sits](assets/diagrams/D3_architecture.png)
 
@@ -31,11 +35,13 @@ find out which you have, per object. The probe does that.
 | Change timestamp | `__TIMESTAMP` (TEXT, comma decimal separator) | e.g. `ZZLASTCHGDATE` (TIMESTAMP_NTZ) |
 | Operation column | `__OPERATION_TYPE` | none |
 | Batch context | `load_type_<hash>`, `run_id_<hash>` | none |
-| Can represent a delete | structurally yes — unverified in practice | no |
+| Can represent a delete | structurally yes — unverified in practice | no — but see note below |
 | First step | validate the metadata — it can be silently corrupted on copies | identify which capabilities the share carries |
 | **Your document** | **[docs/standard-products-cdc.md](docs/standard-products-cdc.md)** — a numbered procedure to follow | **[docs/custom-products-cdc.md](docs/custom-products-cdc.md)** — a specification of what to ask for |
 
-Both tracks share the same engine — dynamic tables with `REFRESH_MODE = INCREMENTAL` — and the same constraint that streams, `CHANGES()`, and change tracking are all refused. [docs/how-it-works.md](docs/how-it-works.md) covers the common mechanism. The two documents above cover what is different.
+Both tracks share the same engine — dynamic tables with `REFRESH_MODE = INCREMENTAL` — and the same constraint that streams, `CHANGES()`, and change tracking are all refused *on the share objects themselves*. [docs/how-it-works.md](docs/how-it-works.md) covers the common mechanism. The two documents above cover what is different.
+
+**Note on deletes.** The table above describes what the *source signal* can express. It is not a statement about what you can detect. A dynamic table over the share detects physical deletes on either track by diffing snapshots, and a standard stream on that dynamic table exposes them as `DELETE` records — so the custom track's missing operation column is not a barrier to delete handling. The one thing no track gives you is a reliable update *flag*: `METADATA$ISUPDATE` is always `FALSE`, and an update arrives as a `DELETE` + `INSERT` pair. Field-validated with a customer; details and the MERGE pattern are in [how-it-works.md](docs/how-it-works.md#the-interposition-that-does-work-a-stream-on-a-dynamic-table).
 
 Run the readiness probe first regardless of track. It classifies every object, validates standard metadata, and confirms the mechanisms work on your specific tenant before you deploy anything.
 
@@ -97,11 +103,13 @@ Two example reports, one per track, are in [examples/](examples/).
 | Change timestamp | `__TIMESTAMP` (TEXT) | e.g. `ZZLASTCHGDATE` (TIMESTAMP_NTZ) |
 | Operation column | `__OPERATION_TYPE` | none |
 | Batch context | `load_type_<hash>`, `run_id_<hash>` | none |
-| **Can represent a delete** | **yes, in principle** — see caveat below | **no** |
+| **Can represent a delete** | **yes, in principle** — see caveat below | **no** at source — deletes are still detectable via a DT + stream |
 | Source-system change required | none | an SLT extension field |
 
 Prefer the standard track wherever it exists: it is the only one of the two that carries an
-operation column, so it is the only one that can express a delete at all.
+operation column, so it is the only one whose *source signal* can express a delete. That is a
+statement about the signal, not about your options — see [Choosing a mechanism](#choosing-a-mechanism)
+for how deletes are detected on either track.
 
 Four columns arrive on a standard product. Three properties of them drive every design
 decision in this repository, and all three were measured rather than assumed.
@@ -211,19 +219,22 @@ scattered across every file.
 
 ![Decision](assets/diagrams/D6_decision.png)
 
-|  | Dynamic table | Watermark + MERGE | INSERT_ONLY stream |
-| --- | --- | --- | --- |
-| Inserts | yes | yes | yes |
-| Updates | yes | yes | yes |
-| **Deletes** | **yes** — diffs snapshots | custom track: **no**, no change-mode column. standard track: **unverified** — an operation column exists but no delete code was ever observed | **no** — by definition |
-| Cheap no-change detection | yes, `NO_DATA` | yes, 0 MB scanned | yes |
-| Code required | none | task + control table + MERGE | task + MERGE |
-| Can feed outside Snowflake | no | yes | yes |
-| Goes stale unread | no | no | yes, 14 days |
-| Blocked by non-deterministic SQL | yes | no | no |
+|  | Dynamic table | DT + stream on the DT | Watermark + MERGE | INSERT_ONLY stream |
+| --- | --- | --- | --- | --- |
+| Inserts | yes | yes | yes | yes |
+| Updates | yes | yes, as a `DELETE`+`INSERT` pair | yes | yes |
+| **Deletes** | **yes** — diffs snapshots | **yes** — readable as `DELETE` records, either track | custom track: **no**, no change-mode column. standard track: **unverified** — an operation column exists but no delete code was ever observed | **no** — by definition |
+| Standard metadata columns | n/a | `METADATA$ACTION`, `METADATA$ROW_ID` | no | no |
+| Cheap no-change detection | yes, `NO_DATA` | inherits the DT | yes, 0 MB scanned | yes |
+| Code required | none | none to capture; a MERGE to apply | task + control table + MERGE | task + MERGE |
+| Can feed outside Snowflake | no | yes | yes | yes |
+| Goes stale unread | no | yes, 14 days | no | yes, 14 days |
+| Blocked by non-deterministic SQL | yes | yes | no | no |
 
-**Use dynamic tables, on both tracks.** They are the only mechanism that reliably captures
-deletes, and they need no code. Reserve the watermark for the two cases they cannot serve: a
+**Use dynamic tables, on both tracks.** They are the mechanism that reliably detects
+deletes, and they need no code. Add a stream on the dynamic table when something needs to read
+those changes as records rather than just see a corrected end state — that is what makes deletes
+actionable on the custom track, and it is field-validated. Reserve the watermark for the two cases they cannot serve: a
 transformation containing a non-deterministic expression such as `CURRENT_DATE()`, and a target
 outside Snowflake.
 
