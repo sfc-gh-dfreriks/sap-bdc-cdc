@@ -46,6 +46,21 @@ TEXT    = "#1A202C"
 WHITE   = "#FFFFFF"
 WARNBG  = "#FFFBEB"
 WARNFG  = "#744210"
+TEAL    = "#158158"     # Snowflake teal accent
+ORANGE  = "#FF9F36"     # Snowflake orange accent (callouts)
+BLUE_DK = "#058DC7"     # template accent1 - table headers
+WARNBG  = "#FFF4E6"
+
+# Big-number strips. A stat is shown only if its value already occurs in the
+# document's text (_stats_in), so the strip can never add a new figure.
+PDF_STATS = [
+    ("0.00 MB", "watermark poll on a 108M-row object, vs 7,035.80 MB for a full read"),
+    ("984 ms", "no-change refresh: NO_DATA without reading source data"),
+    ("4,314,292", "rows in the initial load, in 18.3 s"),
+    ("735,305", "of 735,305 rows corrupted in one local copy"),
+    ("19.0%", "of purchase order items carry a deletion or blocking code"),
+    ("610 ms", "standard product: NO_DATA when nothing moved"),
+]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1334,7 +1349,7 @@ ES_SECTIONS = [
                      "capture physical deletes; the watermark path does not. "
                      "Either way, an independent count check is the safety net."],
                 ],
-                "col_widths": [0.05, 0.95],
+                "col_widths": [0.09, 0.91],
             }),
         ],
     },
@@ -1742,13 +1757,14 @@ def _make_table(headers, rows, col_frac, page_w, styles):
         row_commands.append(("BACKGROUND", (0, i), (-1, i), bg))
 
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), _hex(NAVY)),
+        ("BACKGROUND", (0, 0), (-1, 0), _hex(BLUE_DK)),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [_hex(WHITE), _hex(ALT)]),
-        ("TOPPADDING",    (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 5),
-        ("GRID", (0, 0), (-1, -1), 0.4, _hex(RULE)),
+        ("TOPPADDING",    (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.4, _hex(RULE)),
+        ("LINEBELOW", (0, -1), (-1, -1), 1.2, _hex(BLUE)),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ]))
     return tbl
@@ -1771,19 +1787,82 @@ def _make_code_block(text, page_w, styles):
 
 
 def _make_warn_block(text, page_w, styles):
-    """Amber warning box."""
+    """Warning callout: Snowflake orange bar, warm tint."""
+    return _make_callout(text, page_w, styles, ORANGE, WARNBG, "WATCH OUT")
+
+
+def _make_callout(text, page_w, styles, bar, bg, label):
+    """Callout with a coloured left bar and a small bold label."""
     from reportlab.platypus import Table, TableStyle, Paragraph
-    para = Paragraph(_esc(text), styles["warn"])
-    tbl = Table([[para]], colWidths=[page_w])
+    from reportlab.lib.styles import ParagraphStyle
+    lab = ParagraphStyle("clab", parent=styles["body"], fontName="Helvetica-Bold",
+                         fontSize=7.5, textColor=_hex(bar), leading=10, spaceAfter=2)
+    body = ParagraphStyle("cbody", parent=styles["body"], textColor=_hex(TEXT), spaceAfter=0)
+    tbl = Table([["", [Paragraph(label, lab), Paragraph(_esc(text), body)]]],
+                colWidths=[1.6 * 2.835, page_w - 1.6 * 2.835])
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), _hex(WARNBG)),
-        ("TOPPADDING",    (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ("LEFTPADDING",   (0, 0), (-1, -1), 9),
-        ("RIGHTPADDING",  (0, 0), (-1, -1), 9),
-        ("BOX", (0, 0), (-1, -1), 1.0, _hex(WARNFG)),
+        ("BACKGROUND", (0, 0), (0, 0), _hex(bar)),
+        ("BACKGROUND", (1, 0), (1, 0), _hex(bg)),
+        ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (1, 0), (1, 0), 10), ("RIGHTPADDING", (1, 0), (1, 0), 10),
+        ("LEFTPADDING", (0, 0), (0, 0), 0), ("RIGHTPADDING", (0, 0), (0, 0), 0),
     ]))
     return tbl
+
+
+def _make_section_band(heading, page_w, styles):
+    """Numbered section header: number chip + title on Snowflake midnight blue."""
+    import re
+    from reportlab.platypus import Table, TableStyle, Paragraph
+    from reportlab.lib.styles import ParagraphStyle
+    m = re.match(r"^\s*(\d+)\.?\s+(.*)$", heading)
+    num, text = (m.group(1), m.group(2)) if m else ("", heading)
+    num_st = ParagraphStyle("bandn", fontName="Helvetica-Bold", fontSize=15,
+                            textColor=_hex(WHITE), leading=18, alignment=1)
+    txt_st = ParagraphStyle("bandt", fontName="Helvetica-Bold", fontSize=13.5,
+                            textColor=_hex(WHITE), leading=17)
+    cw = 13 * 2.835
+    tbl = Table([[Paragraph(num, num_st), Paragraph(_esc(text), txt_st)]],
+                colWidths=[cw, page_w - cw])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), _hex(BLUE)),
+        ("BACKGROUND", (1, 0), (1, 0), _hex(NAVY)),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (1, 0), (1, 0), 10),
+    ]))
+    tbl.keepWithNext = True
+    return tbl
+
+
+def _make_stat_strip(stats, page_w):
+    """Row of big-number cards. stats = [(value, label), ...]."""
+    from reportlab.platypus import Table, TableStyle, Paragraph
+    from reportlab.lib.styles import ParagraphStyle
+    colours = [BLUE, TEAL, BLUE, ORANGE]
+    cells = []
+    for i, (v, lbl) in enumerate(stats):
+        c = colours[i % 4]
+        vs = ParagraphStyle(f"sv{i}", fontName="Helvetica-Bold",
+                            fontSize=20 if len(v) <= 8 else 16, textColor=_hex(c), leading=24)
+        ls = ParagraphStyle(f"sl{i}", fontName="Helvetica", fontSize=8, textColor=_hex(SLATE),
+                            leading=10.5)
+        cells.append([Paragraph(_esc(v), vs), Paragraph(_esc(lbl), ls)])
+    n = len(cells)
+    tbl = Table([cells], colWidths=[page_w / n] * n)
+    cmds = [("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BACKGROUND", (0, 0), (-1, -1), _hex(ALT)),
+            ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+            ("LEFTPADDING", (0, 0), (-1, -1), 9), ("RIGHTPADDING", (0, 0), (-1, -1), 6)]
+    for i in range(n):
+        cmds.append(("LINEABOVE", (i, 0), (i, 0), 3, _hex(colours[i % 4])))
+    tbl.setStyle(TableStyle(cmds))
+    return tbl
+
+
+def _stats_in(text, candidates):
+    """Only stats whose value the document already states."""
+    return [st for st in candidates if st[0] in text]
 
 
 def _section_to_flowables(section, page_w, styles):
@@ -1794,9 +1873,12 @@ def _section_to_flowables(section, page_w, styles):
     items = []
 
     level = section.get("level", 1)
-    heading_style = styles["h1"] if level == 1 else styles["h2"]
-    items.append(Paragraph(_esc(section["heading"]), heading_style))
-    items.append(Spacer(1, 2 * mm))
+    if level == 1:
+        items.append(_make_section_band(section["heading"], page_w, styles))
+        items.append(Spacer(1, 3 * mm))
+    else:
+        items.append(Paragraph(_esc(section["heading"]), styles["h2"]))
+        items.append(Spacer(1, 2 * mm))
 
     for kind, content in section.get("body", []):
         if kind == "para":
@@ -1805,7 +1887,8 @@ def _section_to_flowables(section, page_w, styles):
             items.append(Spacer(1, 1 * mm))
             items.append(Paragraph(_esc(content), styles["h2"]))
         elif kind == "note":
-            items.append(Paragraph(_esc(content), styles["note"]))
+            items.append(_make_callout(content, page_w, styles, BLUE, LIGHT, "NOTE"))
+            items.append(Spacer(1, 3 * mm))
         elif kind == "warn":
             items.append(_make_warn_block(content, page_w, styles))
             items.append(Spacer(1, 4 * mm))
@@ -1937,7 +2020,7 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
 
     # ── page templates ────────────────────────────────────────────────────
     cover_frame = Frame(L, B, W - L - R, H - T - B, id="cover")
-    body_frame  = Frame(L, B + 6 * mm, W - L - R, H - T - B - 6 * mm, id="body")
+    body_frame  = Frame(L, B + 6 * mm, W - L - R, H - T - B - 10 * mm, id="body")
 
     def draw_cover(canvas, doc):
         """Paint the strip AND the title on it.
@@ -1955,12 +2038,21 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
         cannot silently fall off the dark background again.
         """
         canvas.saveState()
-        strip_h = 55 * mm
+        # Full-bleed cover: midnight page, Snowflake-blue rule, hero graphic.
         canvas.setFillColor(_hex(DEEP))
-        canvas.rect(0, H - strip_h, W, strip_h, fill=1, stroke=0)
-        # Snowflake Blue accent rule under the strip
+        canvas.rect(0, 0, W, H, fill=1, stroke=0)
         canvas.setFillColor(_hex(BLUE))
-        canvas.rect(0, H - strip_h - 2 * mm, W, 2 * mm, fill=1, stroke=0)
+        canvas.rect(0, H - 8 * mm, W, 8 * mm, fill=1, stroke=0)
+        canvas.setFont("Helvetica-Bold", 9)
+        canvas.setFillColor(_hex(WHITE))
+        canvas.drawString(L, H - 5.6 * mm, "SNOWFLAKE  |  SAP BUSINESS DATA CLOUD")
+        hero = ASSETS_DIR / "B1_hero.png"
+        if hero.is_file():
+            hw = W - L - R
+            canvas.drawImage(str(hero), L, H - 152 * mm, width=hw, height=hw * 4.6 / 12,
+                             mask="auto")
+        canvas.setFillColor(_hex(BLUE))
+        canvas.rect(L, 22 * mm, 40 * mm, 1.6 * mm, fill=1, stroke=0)
 
         def wrapped(text, font, size, max_w):
             out, line = [], ""
@@ -1976,12 +2068,12 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
             return out
 
         avail = W - L - R
-        y = H - 20 * mm
+        y = H - 30 * mm
         canvas.setFillColor(_hex(WHITE))
-        canvas.setFont("Helvetica-Bold", 21)
-        for ln in wrapped(title, "Helvetica-Bold", 21, avail):
+        canvas.setFont("Helvetica-Bold", 26)
+        for ln in wrapped(title, "Helvetica-Bold", 26, avail):
             canvas.drawString(L, y, ln)
-            y -= 9.6 * mm
+            y -= 11.5 * mm
         y -= 1.5 * mm
         canvas.setFillColor(_hex("#BEE7F7"))       # pale Snowflake blue on navy
         canvas.setFont("Helvetica", 11.5)
@@ -1991,7 +2083,19 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
         canvas.restoreState()
 
     def draw_body(canvas, doc):
-        pass  # footer drawn by numbered canvas factory
+        """Running header band on every body page (footer is drawn by the canvas)."""
+        canvas.saveState()
+        canvas.setFillColor(_hex(NAVY))
+        canvas.rect(0, H - 11 * mm, W, 11 * mm, fill=1, stroke=0)
+        canvas.setFillColor(_hex(BLUE))
+        canvas.rect(0, H - 12 * mm, W, 1 * mm, fill=1, stroke=0)
+        canvas.setFont("Helvetica-Bold", 8)
+        canvas.setFillColor(_hex(WHITE))
+        canvas.drawString(L, H - 7 * mm, "SNOWFLAKE")
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(_hex("#BEE7F7"))
+        canvas.drawRightString(W - R, H - 7 * mm, title)
+        canvas.restoreState()
 
     cover_tmpl = PageTemplate(id="Cover", frames=[cover_frame], onPage=draw_cover)
     body_tmpl  = PageTemplate(id="Body",  frames=[body_frame],  onPage=draw_body)
@@ -2016,14 +2120,14 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
     # ── cover ─────────────────────────────────────────────────────────────
     # Title and subtitle are painted onto the strip by draw_cover. The story
     # starts below it, so everything from here down is dark text on white.
-    story.append(Spacer(1, 42 * mm))
+    story.append(Spacer(1, 140 * mm))
 
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.enums import TA_LEFT
 
     cover_meta_style = ParagraphStyle(
         "cmeta", fontName="Helvetica", fontSize=9,
-        textColor=_hex(SLATE), leading=13,
+        textColor=_hex("#BEE7F7"), leading=13,
     )
 
     story.append(HRFlowable(width="100%", thickness=0.8, color=_hex(BLUE)))
@@ -2038,7 +2142,7 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
 
     abstract_style = ParagraphStyle(
         "abstract", fontName="Helvetica", fontSize=10.5,
-        textColor=_hex(TEXT), leading=16, spaceAfter=6, alignment=TA_LEFT,
+        textColor=_hex(WHITE), leading=16, spaceAfter=6, alignment=TA_LEFT,
     )
     story.append(Paragraph(_esc(abstract), abstract_style))
 
@@ -2046,6 +2150,12 @@ def _gen_paper(out_path: Path, title: str, subtitle: str, sections: list,
     from reportlab.platypus import NextPageTemplate
     story.append(NextPageTemplate("Body"))
     story.append(PageBreak())
+
+    stats = _stats_in(repr(sections), PDF_STATS)[:4]
+    if len(stats) >= 3:
+        story.append(Spacer(1, 2 * mm))
+        story.append(_make_stat_strip(stats, usable_w))
+        story.append(Spacer(1, 5 * mm))
 
     for section in sections:
         story.extend(_section_to_flowables(section, usable_w, styles))
@@ -2086,8 +2196,10 @@ def gen_exec_summary(out_path: Path) -> int:
     def draw_page(canvas, doc):
         # header bar
         canvas.saveState()
-        canvas.setFillColor(_hex(NAVY))
+        canvas.setFillColor(_hex(DEEP))
         canvas.rect(0, H - 20 * mm, W, 20 * mm, fill=1, stroke=0)
+        canvas.setFillColor(_hex(BLUE))
+        canvas.rect(0, H - 21.2 * mm, W, 1.2 * mm, fill=1, stroke=0)
         canvas.setFont("Helvetica-Bold", 10)
         canvas.setFillColor(_hex(WHITE))
         canvas.drawString(L, H - 13 * mm, ES_TITLE)
@@ -2117,9 +2229,23 @@ def gen_exec_summary(out_path: Path) -> int:
         textColor=_hex(NAVY), spaceBefore=12, spaceAfter=4, leading=17,
     )
 
-    for section in ES_SECTIONS:
-        story.append(Paragraph(_esc(section["heading"]), h1))
-        story.append(HRFlowable(width="100%", thickness=0.6, color=_hex(BLUE), spaceAfter=4))
+    stats = _stats_in(repr(ES_SECTIONS), PDF_STATS)[:4]
+    if len(stats) >= 3:
+        story.append(_make_stat_strip(stats, usable_w))
+        story.append(Spacer(1, 3 * mm))
+    for n_sec, section in enumerate(ES_SECTIONS, 1):
+        from reportlab.platypus import KeepTogether
+        band = [_make_section_band(f"{n_sec}. {section['heading']}", usable_w, styles),
+                Spacer(1, 2.5 * mm)]
+        first_kind, first = section["body"][0]
+        if first_kind == "para":
+            band.append(Paragraph(_esc(first), styles["body"]))
+            section = dict(section, body=section["body"][1:])
+        elif first_kind == "warn":
+            band.append(_make_warn_block(first, usable_w, styles))
+            band.append(Spacer(1, 3 * mm))
+            section = dict(section, body=section["body"][1:])
+        story.append(KeepTogether(band))
         for kind, content in section["body"]:
             if kind == "para":
                 story.append(Paragraph(_esc(content), styles["body"]))
@@ -2135,6 +2261,12 @@ def gen_exec_summary(out_path: Path) -> int:
                 story.append(Spacer(1, 3 * mm))
         story.append(Spacer(1, 2 * mm))
 
+    cyc = ASSETS_DIR / "B2_cycle.png"
+    if cyc.is_file():
+        from reportlab.platypus import Image as _Img, KeepTogether as _KT
+        story.append(_KT([Spacer(1, 4 * mm),
+                          Paragraph("The capture cycle, end to end", h1),
+                          _Img(str(cyc), width=78 * mm, height=78 * mm)]))
     doc.build(story, canvasmaker=FC)
     _normalize_pdf(out_path)
 
@@ -2623,6 +2755,7 @@ def main(argv=None):
                 "exec-deck"]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
     for target in args:
         if target not in FILENAMES:
@@ -2640,13 +2773,15 @@ def main(argv=None):
             n = gen_exec_summary(out)
             label = f"{n} pages"
         elif target == "deck":
-            n = gen_deck(out)
+            from brand_render import gen_deck_branded
+            n = gen_deck_branded(out, SLIDES, ASSETS_DIR, "deck", _normalize_pptx)
             label = f"{n} slides"
         elif target == "recommendation":
             n = gen_recommendation(out)
             label = f"{n} pages"
         elif target == "exec-deck":
-            n = gen_deck(out, EXEC_SLIDES)
+            from brand_render import gen_deck_branded
+            n = gen_deck_branded(out, EXEC_SLIDES, ASSETS_DIR, "exec-deck", _normalize_pptx)
             label = f"{n} slides"
 
         size_kb = out.stat().st_size // 1024
